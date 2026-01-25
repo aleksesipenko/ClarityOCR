@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OCR PDF Converter</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="title">
+          <div class="h1">
+            <span class="logo">◉</span>
+            OCR PDF
+          </div>
+          <div class="sub">Convert PDFs to Markdown with page markers</div>
+        </div>
+        <div class="topbar-right">
+          <button id="btnSettings" class="btn icon" title="Performance Settings">
+            <span class="settings-icon"></span>
+          </button>
+          <button id="btnTheme" class="btn icon" title="Toggle theme">
+            <span class="theme-icon"></span>
+          </button>
+          <div class="status-wrap">
+            <div class="pill" id="jobStatus">idle</div>
+            <div class="progress-track">
+              <div class="progress-bar" id="progressBar"></div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section class="card">
+        <div class="row">
+          <label class="label">Folder</label>
+          <input id="folderPath" class="input" type="text" spellcheck="false" placeholder="Select a folder..." />
+          <button id="btnBrowse" class="btn">Browse</button>
+          <div class="inline-control">
+            <label class="label-sm">Max pages</label>
+            <input id="maxPages" class="input-sm" type="number" value="500" min="10" max="5000" step="10" />
+          </div>
+          <button id="btnScan" class="btn primary">Refresh</button>
+        </div>
+        <div class="row row-actions">
+          <button id="btnSelectAll" class="btn">Select all</button>
+          <button id="btnSelectNone" class="btn">Select none</button>
+          <button id="btnSelectNew" class="btn">Select pending</button>
+          <div class="spacer"></div>
+          <div class="stats" id="stats"></div>
+          <button id="btnRun" class="btn primary">Run OCR</button>
+          <button id="btnStop" class="btn danger" disabled>Stop</button>
+        </div>
+        <!-- Post-processing row -->
+        <div class="row row-actions postprocess-row">
+          <span class="label">Post-processing:</span>
+          <button id="btnFixMojibake" class="btn" title="Fix encoding issues in converted files">Fix Mojibake</button>
+          <a href="/llm-polish" class="btn primary" title="Open LLM Polish page with full progress tracking">LLM Polish →</a>
+          <span class="llm-status" id="llmStatus"></span>
+        </div>
+
+        <!-- Pipeline Settings -->
+        <details class="pipeline-settings" open>
+          <summary class="settings-toggle">
+            <span class="settings-icon-inline">⚙</span> Pipeline Settings
+            <span class="toggle-arrow">▼</span>
+          </summary>
+          
+          <div class="settings-content">
+            <!-- Output Directory Row -->
+            <div class="row settings-row">
+              <label class="label">Output folder</label>
+              <input id="outputPath" class="input" type="text" spellcheck="false" placeholder="Select output folder for MD files..." />
+              <button id="btnBrowseOutput" class="btn">Browse</button>
+            </div>
+            
+            <!-- LLM Auto-Polish Row -->
+            <div class="row settings-row llm-row">
+              <label class="label">LLM Polish</label>
+              <div class="llm-options">
+                <label class="radio-label">
+                  <input type="radio" name="llmMode" value="disabled" checked> Disabled
+                </label>
+                <label class="radio-label">
+                  <input type="radio" name="llmMode" value="after_each"> After each file
+                </label>
+                <label class="radio-label">
+                  <input type="radio" name="llmMode" value="after_all"> After all files
+                </label>
+              </div>
+              <div class="llm-status-indicator" id="llmStatusIndicator">
+                <span class="status-dot"></span>
+                <span class="status-text" id="llmStatusText">Checking...</span>
+              </div>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="card">
+        <div class="tableWrap">
+          <table class="table" id="pdfTable">
+            <thead>
+              <tr>
+                <th class="colCheck">
+                  <input type="checkbox" id="checkAll" title="Toggle all" />
+                </th>
+                <th class="sortable" data-col="name">File <span class="sort-icon"></span></th>
+                <th class="sortable colPages" data-col="pages">Pages <span class="sort-icon"></span></th>
+                <th class="sortable colStatus" data-col="status">Status <span class="sort-icon"></span></th>
+              </tr>
+            </thead>
+            <tbody id="pdfTbody"></tbody>
+          </table>
+        </div>
+        <div class="table-footer" id="tableFooter"></div>
+      </section>
+
+      <section class="card">
+        <div class="logHead">
+          <div class="label">Live log</div>
+          <div class="log-controls">
+            <label class="checkbox-label">
+              <input type="checkbox" id="autoScroll" checked />
+              Auto-scroll
+            </label>
+            <button id="btnClearLog" class="btn btn-sm">Clear</button>
+          </div>
+        </div>
+        <pre class="log" id="log"></pre>
+        
+        <!-- GPU Monitoring Panel (visible during job) -->
+        <div class="gpu-monitor" id="gpuMonitor">
+          <div class="monitor-row">
+            <div class="monitor-item">
+              <span class="monitor-label">GPU</span>
+              <div class="monitor-bar-track">
+                <div class="monitor-bar gpu-bar" id="monitorGpuBar"></div>
+              </div>
+              <span class="monitor-value" id="monitorGpuUtil">--%</span>
+            </div>
+            <div class="monitor-item">
+              <span class="monitor-label">VRAM</span>
+              <div class="monitor-bar-track">
+                <div class="monitor-bar vram-bar" id="monitorVramBar"></div>
+              </div>
+              <span class="monitor-value" id="monitorVramText">--/-- GB</span>
+            </div>
+            <div class="monitor-item">
+              <span class="monitor-label">Temp</span>
+              <span class="monitor-value temp" id="monitorTemp">--°C</span>
+            </div>
+            <div class="monitor-item">
+              <span class="monitor-label">Speed</span>
+              <span class="monitor-value speed" id="monitorSpeed">-- p/min</span>
+            </div>
+            <div class="monitor-item">
+              <span class="monitor-label">Batch</span>
+              <span class="monitor-value" id="monitorBatch">--</span>
+            </div>
+            <div class="monitor-item">
+              <span class="monitor-label">ETA</span>
+              <span class="monitor-value eta" id="monitorEta">--:--</span>
+            </div>
+          </div>
+        </div>
+        
+        <!-- OCR Text Preview (visible during/after OCR) -->
+        <div class="ocr-preview-panel" id="ocrPreviewPanel" hidden>
+          <div class="preview-header">
+            <span class="preview-title">OCR Output Preview</span>
+            <span class="preview-info" id="ocrPreviewInfo">-</span>
+          </div>
+          <div class="preview-content">
+            <pre class="preview-text" id="ocrPreviewText">Waiting for OCR output...</pre>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span>OCR Web UI</span>
+        <span class="sep">•</span>
+        <span>marker + pypdfium2</span>
+      </footer>
+    </div>
+
+    <!-- Browse Modal -->
+    <div class="modal" id="modal" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modalCard">
+        <div class="modalHead">
+          <div class="h2">Browse folders</div>
+          <div class="row">
+            <button id="btnUseFolder" class="btn primary">Use this folder</button>
+            <button id="btnCloseModal" class="btn">Cancel</button>
+          </div>
+        </div>
+        <div class="modalBody">
+          <div class="breadcrumbs" id="breadcrumbs"></div>
+          <div class="row">
+            <input id="browsePath" class="input" type="text" spellcheck="false" placeholder="Enter path..." />
+            <button id="btnUp" class="btn">↑ Up</button>
+            <button id="btnGo" class="btn primary">Go</button>
+          </div>
+          <div class="browse-error" id="browseError"></div>
+          <div class="browseList" id="browseList"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Performance Settings Modal -->
+    <div class="modal" id="settingsModal" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modalCard settings-modal">
+        <div class="modalHead">
+          <div class="h2">Performance Info</div>
+          <div class="row">
+            <button id="btnCloseSettings" class="btn primary">Close</button>
+          </div>
+        </div>
+        <div class="modalBody">
+          <!-- GPU Info -->
+          <div class="gpu-info" id="gpuInfo">
+            <span class="gpu-name" id="gpuName">--</span>
+            <div class="vram-display">
+              <span class="vram-label">VRAM</span>
+              <div class="vram-bar-track">
+                <div class="vram-bar" id="vramBar"></div>
+              </div>
+              <span class="vram-text" id="vramText">--/-- GB</span>
+            </div>
+          </div>
+
+          <!-- Fixed Configuration Info -->
+          <div class="settings-section">
+            <div class="section-title">Fixed Reliable Configuration</div>
+            <div class="config-info">
+              <p>Using optimized batch sizes that always work without OOM:</p>
+              <ul class="config-list">
+                <li><strong>Layout batch:</strong> 4</li>
+                <li><strong>Recognition batch:</strong> 8</li>
+                <li><strong>Detection batch:</strong> 8</li>
+              </ul>
+              <p class="config-note">These settings provide stable performance on RTX 4070 Ti SUPER (16GB) for PDFs of any size.</p>
+            </div>
+          </div>
+
+          <!-- OOM Behavior -->
+          <div class="settings-section">
+            <div class="section-title">OOM Recovery</div>
+            <label class="checkbox-label">
+              <input type="checkbox" id="autoFallback" checked>
+              Auto-reduce batch size on OOM (recommended)
+            </label>
+            <div class="oom-hint">If CUDA runs out of memory, automatically retry with smaller batch sizes.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Post-processing Modal -->
+    <div class="modal" id="postprocessModal" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modalCard postprocess-modal">
+        <div class="modalHead">
+          <div class="h2" id="postprocessTitle">Post-processing</div>
+          <div class="row">
+            <button id="btnClosePostprocess" class="btn">Close</button>
+          </div>
+        </div>
+        <div class="modalBody">
+          <div class="postprocess-status" id="postprocessStatus">
+            <div class="spinner"></div>
+            <span>Processing...</span>
+          </div>
+          <pre class="postprocess-output" id="postprocessOutput"></pre>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

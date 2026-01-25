@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clarityocr"
+version = "1.0.0"
+description = "High-quality PDF to Markdown conversion with GPU-accelerated OCR and LLM post-processing"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "ClarityOCR Team"}
+]
+keywords = [
+    "ocr",
+    "pdf",
+    "markdown",
+    "document-conversion",
+    "llm",
+    "gpu",
+    "nvidia",
+    "machine-learning",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: General",
+    "Topic :: Multimedia :: Graphics :: Capture :: Scanners",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "marker-pdf>=0.3.0",
+    "torch>=2.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "openai>=1.0.0",
+    "pypdfium2>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourname/ClarityOCR"
+Documentation = "https://github.com/yourname/ClarityOCR#readme"
+Repository = "https://github.com/yourname/ClarityOCR.git"
+Issues = "https://github.com/yourname/ClarityOCR/issues"
+
+[project.scripts]
+clarityocr = "clarityocr.cli:main"
+clarityocr-server = "clarityocr.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["clarityocr*"]
+
+[tool.setuptools.package-data]
+"clarityocr.web.static" = ["*.html", "*.css", "*.js"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

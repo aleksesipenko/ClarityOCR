@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM Polish - OCR PDF Converter</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/llm-polish.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="title">
+          <div class="h1">
+            <span class="logo">◉</span>
+            LLM Polish
+          </div>
+          <div class="sub">Polish OCR text with local LLM</div>
+        </div>
+        <div class="topbar-right">
+          <a href="/" class="btn">← Back to OCR</a>
+          <button id="btnTheme" class="btn icon" title="Toggle theme">
+            <span class="theme-icon"></span>
+          </button>
+          <div class="status-wrap">
+            <div class="pill" id="jobStatus">idle</div>
+            <div class="progress-track">
+              <div class="progress-bar" id="progressBar"></div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- LM Studio Status Card -->
+      <section class="card status-card">
+        <div class="status-header">
+          <div class="status-indicator" id="llmStatusIndicator">
+            <span class="status-dot"></span>
+            <span class="status-text" id="llmStatusText">Checking LM Studio...</span>
+          </div>
+          <div class="status-details" id="llmStatusDetails"></div>
+        </div>
+      </section>
+
+      <!-- Controls Card -->
+      <section class="card">
+        <div class="row">
+          <label class="label">Files</label>
+          <div class="file-summary" id="fileSummary">No files loaded</div>
+          <button id="btnRefresh" class="btn">Refresh</button>
+        </div>
+        <div class="row row-actions">
+          <button id="btnSelectAll" class="btn">Select all OCR'd</button>
+          <button id="btnSelectUnpolished" class="btn">Select unpolished</button>
+          <button id="btnSelectNone" class="btn">Select none</button>
+          <div class="spacer"></div>
+          <div class="stats" id="stats"></div>
+          <button id="btnRun" class="btn primary" disabled>Start Polish</button>
+          <button id="btnStop" class="btn danger" disabled>Stop</button>
+        </div>
+      </section>
+
+      <!-- Files Table -->
+      <section class="card">
+        <div class="tableWrap">
+          <table class="table" id="filesTable">
+            <thead>
+              <tr>
+                <th class="colCheck">
+                  <input type="checkbox" id="checkAll" title="Toggle all" />
+                </th>
+                <th class="sortable" data-col="name">File <span class="sort-icon"></span></th>
+                <th class="sortable colSize" data-col="size">Size <span class="sort-icon"></span></th>
+                <th class="sortable colStatus" data-col="status">Status <span class="sort-icon"></span></th>
+              </tr>
+            </thead>
+            <tbody id="filesTbody"></tbody>
+          </table>
+        </div>
+        <div class="table-footer" id="tableFooter"></div>
+      </section>
+
+      <!-- Progress Panel (visible during job) -->
+      <section class="card progress-card" id="progressCard" hidden>
+        <div class="progress-header">
+          <div class="h2">Processing Progress</div>
+          <div class="progress-summary" id="progressSummary"></div>
+        </div>
+        
+        <div class="progress-details">
+          <div class="detail-row">
+            <div class="detail-item">
+              <span class="detail-label">Current File</span>
+              <span class="detail-value" id="currentFile">-</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Files</span>
+              <span class="detail-value" id="filesProgress">0/0</span>
+            </div>
+          </div>
+          
+          <div class="chunk-progress">
+            <div class="chunk-header">
+              <span class="chunk-label">Chunks</span>
+              <span class="chunk-value" id="chunksProgress">0/0</span>
+            </div>
+            <div class="chunk-bar-track">
+              <div class="chunk-bar" id="chunkBar"></div>
+            </div>
+          </div>
+          
+          <div class="detail-row">
+            <div class="detail-item">
+              <span class="detail-label">Speed</span>
+              <span class="detail-value speed" id="speed">- chars/s</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">ETA</span>
+              <span class="detail-value eta" id="eta">--:--</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Modified</span>
+              <span class="detail-value" id="modified">0</span>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Chunk Diff Preview -->
+        <div class="chunk-diff-container" id="chunkDiffContainer">
+          <div class="diff-header">
+            <span class="diff-title">Last Chunk Changes</span>
+          </div>
+          <div class="diff-panels">
+            <div class="diff-panel">
+              <div class="diff-panel-header">Original</div>
+              <pre class="diff-content" id="diffOriginal">Waiting for first chunk...</pre>
+            </div>
+            <div class="diff-panel">
+              <div class="diff-panel-header">After LLM</div>
+              <pre class="diff-content" id="diffResult">Waiting for first chunk...</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Log Panel -->
+      <section class="card">
+        <div class="logHead">
+          <div class="label">Live log</div>
+          <div class="log-controls">
+            <label class="checkbox-label">
+              <input type="checkbox" id="autoScroll" checked />
+              Auto-scroll
+            </label>
+            <button id="btnClearLog" class="btn btn-sm">Clear</button>
+          </div>
+        </div>
+        <pre class="log" id="log"></pre>
+      </section>
+
+      <footer class="footer">
+        <span>LLM Polish</span>
+        <span class="sep">•</span>
+        <span>LM Studio + OpenAI API</span>
+      </footer>
+    </div>
+
+    <!-- Toast container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="/static/llm-polish.js"></script>
+  </body>
+</html>
