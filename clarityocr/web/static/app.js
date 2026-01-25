@@ -1025,9 +1025,10 @@ function renderBreadcrumbs(path) {
   
   parts.forEach((part, i) => {
     if (i === 0 && isWindows) {
-      accumulated = part;
+      // For drive letter, include the backslash (C:\)
+      accumulated = part + "\\";
     } else {
-      accumulated += (accumulated.endsWith(":") || accumulated === "" ? "" : "\\") + part;
+      accumulated += (accumulated.endsWith("\\") || accumulated.endsWith(":") || accumulated === "" ? "" : "\\") + part;
     }
     
     const crumb = document.createElement("span");

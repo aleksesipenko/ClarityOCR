@@ -871,7 +871,19 @@ def llm_polish_page() -> FileResponse:
 
 @app.get("/api/browse")
 def api_browse(path: Optional[str] = None) -> JSONResponse:
+    # Handle empty or whitespace path
+    if path is not None:
+        path = path.strip()
+        if not path:
+            path = None
+
     base = Path(path) if path else default_sources_dir()
+
+    # Try to resolve the path to handle encoding issues
+    try:
+        base = base.resolve()
+    except (OSError, ValueError):
+        pass  # Keep original if resolve fails
 
     # Security: validate path to prevent traversal attacks
     if not is_path_safe(base):
@@ -886,12 +898,17 @@ def api_browse(path: Optional[str] = None) -> JSONResponse:
         )
 
     if not base.exists() or not base.is_dir():
+        # More informative error for debugging
+        if not base.exists():
+            err_detail = f"Path does not exist: {base}"
+        else:
+            err_detail = f"Not a directory (is file): {base}"
         return JSONResponse(
             {
                 "path": str(base),
-                "parent": None,
+                "parent": str(base.parent) if base.parent != base else None,
                 "items": [],
-                "error": "Not a directory",
+                "error": err_detail,
             },
             status_code=400,
         )
