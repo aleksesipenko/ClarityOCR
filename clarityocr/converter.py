@@ -161,10 +161,11 @@ DEFAULT_OUTPUT_DIR = Path.cwd() / "output"
 # ROBUST TIMEOUT & VRAM MANAGEMENT
 # ============================================================================
 
-# Timeout settings - GENEROUS (marker may see more pages than pypdfium2)
-BASE_TIMEOUT_S = 120  # 2 minutes minimum per PDF (marker can surprise us)
-PER_PAGE_TIMEOUT_S = 3.0  # 3s per page - safe margin for all phases
-MAX_TIMEOUT_S = 900  # cap at 15 minutes for huge PDFs
+# Timeout settings - DISABLED BY DEFAULT (use --timeout to enable)
+# When enabled, timeout = BASE + pages * PER_PAGE
+BASE_TIMEOUT_S = 300  # 5 minutes minimum per PDF
+PER_PAGE_TIMEOUT_S = 10.0  # 10s per page (very generous)
+MAX_TIMEOUT_S = 0  # 0 = NO TIMEOUT (disabled by default)
 
 # VRAM pressure thresholds - STRICT
 VRAM_PRESSURE_THRESHOLD = 0.80  # Start reducing at 80% (not 85%)
@@ -187,8 +188,10 @@ _stats_stop = threading.Event()
 _print_lock = threading.Lock()  # Prevent JSON output interleaving between threads
 
 
-def calculate_timeout(page_count: int) -> int:
-    """Calculate adaptive timeout based on page count."""
+def calculate_timeout(page_count: int) -> Optional[int]:
+    """Calculate adaptive timeout based on page count. Returns None if timeout disabled."""
+    if MAX_TIMEOUT_S == 0:
+        return None  # Timeout disabled
     timeout = int(BASE_TIMEOUT_S + page_count * PER_PAGE_TIMEOUT_S)
     return min(MAX_TIMEOUT_S, max(BASE_TIMEOUT_S, timeout))
 
@@ -571,16 +574,16 @@ def convert_pdf_with_timeout(
     layout_bs: int,
     recognition_bs: int,
     detection_bs: int,
-    timeout_s: int,
+    timeout_s: Optional[int],
     queue_timeout: float = 15.0,
 ) -> Tuple[str, Dict[str, bytes], int]:
     """
-    Convert PDF with hard timeout enforcement using multiprocessing.
+    Convert PDF with optional timeout enforcement using multiprocessing.
 
     Args:
         pdf_path: Path to PDF file
         layout_bs, recognition_bs, detection_bs: Batch sizes for marker
-        timeout_s: Maximum seconds to wait for conversion
+        timeout_s: Maximum seconds to wait for conversion (None = no timeout)
         queue_timeout: Seconds to wait for result from queue after process exits
 
     Returns:
@@ -600,38 +603,32 @@ def convert_pdf_with_timeout(
     p.start()
 
     try:
-        p.join(timeout=timeout_s)
+        start_time = time.time()
+        result: Optional[Dict[str, Any]] = None
 
-        if p.is_alive():
-            # Still running after timeout - kill it
-            print(f"  [timeout] Conversion exceeded {timeout_s}s - terminating...")
-            p.terminate()
-            p.join(timeout=5)
-            if p.is_alive():
-                print(f"  [timeout] Process not responding to terminate - killing...")
-                p.kill()
-                p.join(timeout=2)
-            raise ConversionTimeoutError(
-                f"Conversion of {pdf_path.name} exceeded {timeout_s}s limit"
-            )
+        while True:
+            if timeout_s is not None and (time.time() - start_time) > timeout_s:
+                print(f"  [timeout] Conversion exceeded {timeout_s}s - terminating...")
+                p.terminate()
+                p.join(timeout=5)
+                if p.is_alive():
+                    print(f"  [timeout] Process not responding to terminate - killing...")
+                    p.kill()
+                    p.join(timeout=2)
+                raise ConversionTimeoutError(
+                    f"Conversion of {pdf_path.name} exceeded {timeout_s}s limit"
+                )
 
-        # Process finished - check exit status
-        if p.exitcode != 0:
-            # Process crashed - try to get error from queue
             try:
-                result = result_queue.get(timeout=2)
-                if not result.get("success", False):
-                    raise RuntimeError(
-                        f"Worker error: {result.get('error', 'Unknown error')}\n"
-                        f"{result.get('traceback', '')}"
-                    )
+                result = result_queue.get(timeout=0.5)
+                break
             except queue.Empty:
-                raise RuntimeError(f"Worker crashed with exit code {p.exitcode}")
+                if not p.is_alive():
+                    break
 
-        # Normal completion - get result
-        try:
-            result = result_queue.get(timeout=queue_timeout)
-        except queue.Empty:
+        if result is None:
+            if p.exitcode and p.exitcode != 0:
+                raise RuntimeError(f"Worker crashed with exit code {p.exitcode}")
             raise RuntimeError("Worker completed but produced no output")
 
         if result.get("success", False):
@@ -640,8 +637,7 @@ def convert_pdf_with_timeout(
                 result.get("images", {}),
                 result.get("actual_pages", 1),
             )
-        else:
-            raise RuntimeError(f"Conversion failed: {result.get('error', 'Unknown error')}")
+        raise RuntimeError(f"Conversion failed: {result.get('error', 'Unknown error')}")
 
     finally:
         # Ensure cleanup even on exceptions
@@ -792,7 +788,26 @@ def normalize_page_markers(md_text: str) -> str:
     if not md_text.lstrip().startswith("[p:"):
         md_text = "[p:1]\n\n" + md_text.lstrip("\n")
 
+    # If markers are 0-based, shift to 1-based.
+    markers = _PAGE_MARKER_LINE_RE.findall(md_text)
+    if markers and any(m == "0" for m in markers):
+
+        def _shift(m: re.Match[str]) -> str:
+            return f"[p:{int(m.group(1)) + 1}]"
+
+        md_text = _PAGE_MARKER_LINE_RE.sub(_shift, md_text)
+
     return md_text
+
+
+def count_page_markers(md_text: str) -> int:
+    markers = _PAGE_MARKER_LINE_RE.findall(md_text)
+    if not markers:
+        return 0
+    try:
+        return max(int(m) for m in markers)
+    except ValueError:
+        return 0
 
 
 def output_has_page_markers(md_path: Path) -> bool:
@@ -850,34 +865,57 @@ def build_marker_config(layout_bs: int, recognition_bs: int, detection_bs: int):
 
 
 def get_page_count(pdf_path):
-    """Get page count from PDF"""
-    try:
-        try:
-            import pypdfium2 as pdfium
+    """Get page count from PDF (handles non-ASCII paths)"""
+    pdf_path = Path(pdf_path)
 
-            doc = pdfium.PdfDocument(str(pdf_path))
+    # Try pypdfium2 first (fastest)
+    try:
+        import pypdfium2 as pdfium
+
+        # pypdfium2 can fail on non-ASCII paths on Windows
+        # Try with resolved path first, then with short path if needed
+        try:
+            doc = pdfium.PdfDocument(str(pdf_path.resolve()))
             count = len(doc)
             doc.close()
-            return int(count)
+            if count > 0:
+                return int(count)
         except Exception:
             pass
 
-        # Fallbacks (slower, but better than 0): pypdf / PyPDF2.
+        # Try opening with bytes (works better with non-ASCII)
         try:
-            from pypdf import PdfReader  # type: ignore
-
-            return int(len(PdfReader(str(pdf_path)).pages))
+            with open(pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+            doc = pdfium.PdfDocument(pdf_bytes)
+            count = len(doc)
+            doc.close()
+            if count > 0:
+                return int(count)
         except Exception:
             pass
+    except ImportError:
+        pass
 
-        try:
-            from PyPDF2 import PdfReader  # type: ignore
+    # Fallback to pypdf (slower, but reliable)
+    try:
+        from pypdf import PdfReader  # type: ignore
 
-            return int(len(PdfReader(str(pdf_path)).pages))
-        except Exception:
-            return 0
+        return int(len(PdfReader(str(pdf_path)).pages))
     except Exception:
-        return 0
+        pass
+
+    # Fallback to PyPDF2
+    try:
+        from PyPDF2 import PdfReader  # type: ignore
+
+        return int(len(PdfReader(str(pdf_path)).pages))
+    except Exception:
+        pass
+
+    # Last resort: assume 100 pages (generous timeout)
+    log_warning(f"Could not determine page count for {pdf_path.name}, assuming 100")
+    return 100
 
 
 def parse_args() -> argparse.Namespace:
@@ -1052,16 +1090,17 @@ def main():
         pdf_name = pdf.name
         short_name = pdf_name[:55] if len(pdf_name) > 55 else pdf_name
 
-        # Calculate adaptive timeout for this PDF
+        # Calculate adaptive timeout for this PDF (None = no timeout)
         timeout_s = calculate_timeout(expected_pages)
+        timeout_str = f"{timeout_s}s" if timeout_s else "OFF"
 
         log_info(f"PDF [{i}/{len(pdf_info)}] {pdf_name}")
-        log_debug(f"  Expected pages: {expected_pages}, Timeout: {timeout_s}s")
+        log_debug(f"  Expected pages: {expected_pages}, Timeout: {timeout_str}")
 
         print(f"\n{'─' * 70}")
         print(f"[{i}/{len(pdf_info)}] {short_name}")
         print(
-            f"Pages: {expected_pages} | Progress: {processed_pages}/{total_pages} total | Timeout: {timeout_s}s"
+            f"Pages: {expected_pages} | Progress: {processed_pages}/{total_pages} total | Timeout: {timeout_str}"
         )
         print(f"{'─' * 70}")
 
@@ -1112,7 +1151,7 @@ def main():
                     if not cuda_health_check():
                         raise RuntimeError("CUDA GPU unresponsive")
 
-                print(f"  Converting with batch_size={bs} (timeout: {timeout_s}s)...")
+                print(f"  Converting with batch_size={bs} (timeout: {timeout_str})...")
 
                 # Use multiprocessing-based conversion with hard timeout
                 text, images, actual_pages = convert_pdf_with_timeout(
@@ -1126,6 +1165,9 @@ def main():
                 # Fix encoding issues (CP1251 misread as Latin-1) and normalize markers
                 text = fix_mojibake(text)
                 text = normalize_page_markers(text)
+                marker_pages = count_page_markers(text)
+                if marker_pages > 0:
+                    actual_pages = marker_pages
 
                 # Use actual pages from conversion if available
                 if actual_pages == 0:

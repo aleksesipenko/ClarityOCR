@@ -1518,6 +1518,48 @@ details[open] .toggle-arrow {
   box-shadow: 0 0 8px var(--success-light);
 }
 
+/* =============================================================================
+   Transition Overlay
+   ============================================================================= */
+
+.transition-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.transition-overlay.active {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.transition-content {
+  text-align: center;
+  animation: transitionPulse 1.2s ease-in-out infinite;
+}
+
+.transition-content .logo {
+  font-size: 44px;
+  margin-bottom: 10px;
+}
+
+.transition-content .message {
+  font-size: 16px;
+  color: var(--ink-secondary);
+}
+
+@keyframes transitionPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 .llm-status-indicator.offline .status-dot {
   background: var(--danger);
 }

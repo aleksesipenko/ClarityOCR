@@ -388,6 +388,11 @@ PROGRESS_PATTERNS = {
     "gpu_stats": re.compile(r"^\[GPU_STATS\]\s*(.+)$"),
     "timeout_info": re.compile(r"Timeout:\s*(\d+)s"),
     "ocr_preview": re.compile(r"^\[OCR_PREVIEW\]\s*(.+)$"),
+    # tqdm progress with stage: "Recognizing Text:  37%|███| 124/333 [03:00<00:56,  3.72it/s]"
+    # Also matches: "Detecting bboxes:", "Layout detection:", etc.
+    "tqdm_progress": re.compile(
+        r"^([A-Za-z ]+):\s*\d+%\|.*\|\s*(\d+)/(\d+)\s+\[[\d:]+<([\d:]+),\s*([\d.]+)(it/s|s/it)"
+    ),
 }
 
 
@@ -403,6 +408,17 @@ class JobProgress:
     speed: float = 0.0
     vram: float = 0.0
     eta: str = ""
+    job_speed: float = 0.0
+    job_eta: str = ""
+    job_started_at: float = 0.0
+    stage_name: str = ""
+    stage_current: int = 0
+    stage_total: int = 0
+    stage_speed: float = 0.0
+    stage_eta: str = ""
+    last_tqdm_log_time: float = 0.0
+    last_tqdm_log_current: int = 0
+    last_tqdm_log_stage: str = ""
     completed: bool = False
     errors: list[str] = field(default_factory=list)
 
@@ -710,6 +726,17 @@ def q_put(msg: dict[str, Any]) -> None:
 def parse_progress_line(line: str, progress: JobProgress) -> Optional[dict[str, Any]]:
     """Parse a line and update progress. Returns event dict if significant."""
 
+    def format_eta(seconds: float) -> str:
+        if seconds <= 0:
+            return ""
+        total = int(seconds)
+        hours = total // 3600
+        minutes = (total % 3600) // 60
+        secs = total % 60
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes}:{secs:02d}"
+
     # GPU stats: [GPU_STATS] {"gpu_util": 85, "vram_used": 12.5, ...}
     if m := PROGRESS_PATTERNS["gpu_stats"].match(line):
         try:
@@ -732,12 +759,22 @@ def parse_progress_line(line: str, progress: JobProgress) -> Optional[dict[str, 
         progress.file_index = int(m.group(1))
         progress.total_files = int(m.group(2))
         progress.current_file = m.group(3).strip()
+        if progress.job_started_at <= 0:
+            progress.job_started_at = time.time()
         return {"type": "file_start", **asdict(progress)}
 
     # Page progress: Progress: 120/350
     if m := PROGRESS_PATTERNS["page_progress"].search(line):
         progress.pages_done = int(m.group(1))
         progress.total_pages = int(m.group(2))
+        if progress.job_started_at <= 0:
+            progress.job_started_at = time.time()
+        elapsed = time.time() - progress.job_started_at
+        if elapsed > 0 and progress.pages_done > 0:
+            progress.job_speed = progress.pages_done / (elapsed / 60)
+            remaining_pages = progress.total_pages - progress.pages_done
+            if progress.job_speed > 0 and remaining_pages > 0:
+                progress.job_eta = format_eta((remaining_pages / progress.job_speed) * 60)
         return {"type": "progress", **asdict(progress)}
 
     # File done: DONE: 45 pages in 12.3s
@@ -752,7 +789,34 @@ def parse_progress_line(line: str, progress: JobProgress) -> Optional[dict[str, 
             progress.vram = float(vm.group(1))
         if em := PROGRESS_PATTERNS["eta"].search(line):
             progress.eta = em.group(1)
+        if progress.speed > 0:
+            progress.job_speed = progress.speed
+        if progress.eta:
+            progress.job_eta = progress.eta
         return {"type": "file_done", **asdict(progress)}
+
+    # Metrics line: Total: X/Y pages | Speed: N p/min | VRAM: X.XGB | ETA: MM:SS | batch=N
+    # This line comes AFTER the DONE line and contains speed/batch/eta
+    if "Speed:" in line and "p/min" in line:
+        updated = False
+        if bm := PROGRESS_PATTERNS["batch_size"].search(line):
+            progress.batch_size = int(bm.group(1))
+            updated = True
+        if sm := PROGRESS_PATTERNS["speed"].search(line):
+            progress.speed = float(sm.group(1))
+            updated = True
+        if vm := PROGRESS_PATTERNS["vram"].search(line):
+            progress.vram = float(vm.group(1))
+            updated = True
+        if em := PROGRESS_PATTERNS["eta"].search(line):
+            progress.eta = em.group(1)
+            updated = True
+        if updated:
+            if progress.speed > 0:
+                progress.job_speed = progress.speed
+            if progress.eta:
+                progress.job_eta = progress.eta
+            return {"type": "metrics_update", **asdict(progress)}
 
     # File failed or timed out
     if PROGRESS_PATTERNS["file_failed"].search(line):
@@ -764,7 +828,55 @@ def parse_progress_line(line: str, progress: JobProgress) -> Optional[dict[str, 
         progress.completed = True
         return {"type": "job_complete", "success": len(progress.errors) == 0}
 
+    # tqdm progress: "Recognizing Text:  37%|███| 124/333 [03:00<00:56,  3.72it/s]"
+    # Extract realtime speed, ETA and stage from tqdm output
+    if m := PROGRESS_PATTERNS["tqdm_progress"].search(line):
+        stage = m.group(1).strip()  # "Recognizing Text", "Detecting bboxes", etc.
+        current = int(m.group(2))
+        total = int(m.group(3))
+        eta_str = m.group(4)  # "00:56" or "19:34"
+        speed_val = float(m.group(5))
+        speed_unit = m.group(6)  # "it/s" or "s/it"
+        if speed_unit == "it/s":
+            stage_speed = speed_val
+        else:
+            stage_speed = 1 / speed_val if speed_val > 0 else 0
+
+        progress.stage_name = stage
+        progress.stage_current = current
+        progress.stage_total = total
+        progress.stage_speed = stage_speed
+        progress.stage_eta = eta_str
+
+        return {"type": "tqdm_progress", "stage": stage, **asdict(progress)}
+
     return None
+
+
+def should_log_tqdm_line(progress: JobProgress) -> bool:
+    now = time.time()
+    stage = progress.stage_name
+    current = progress.stage_current
+    total = progress.stage_total
+
+    if stage != progress.last_tqdm_log_stage:
+        progress.last_tqdm_log_stage = stage
+        progress.last_tqdm_log_current = current
+        progress.last_tqdm_log_time = now
+        return True
+
+    min_delta = max(1, total // 20) if total > 0 else 1
+    if current - progress.last_tqdm_log_current >= min_delta:
+        progress.last_tqdm_log_current = current
+        progress.last_tqdm_log_time = now
+        return True
+
+    if now - progress.last_tqdm_log_time >= 2.0:
+        progress.last_tqdm_log_time = now
+        progress.last_tqdm_log_current = current
+        return True
+
+    return False
 
 
 def reader_thread(proc: subprocess.Popen[str], job: Job) -> None:
@@ -782,6 +894,13 @@ def reader_thread(proc: subprocess.Popen[str], job: Job) -> None:
             if event and event.get("type") in ("gpu_stats", "ocr_preview"):
                 q_put(event)  # Send to SSE for UI panels
                 continue  # Don't add to terminal log
+
+            if event and event.get("type") == "tqdm_progress":
+                q_put(event)
+                with progress_lock:
+                    if should_log_tqdm_line(job.progress):
+                        q_put({"type": "log", "line": line})
+                continue
 
             # All other lines go to terminal log
             q_put({"type": "log", "line": line})
@@ -1047,9 +1166,12 @@ def api_job_start(payload: JobStartRequest) -> JSONResponse:
             }
         )
 
+        # Use home directory as cwd to avoid PyTorch import conflicts
+        # (PyTorch fails if cwd contains certain folder names)
+        safe_cwd = str(Path.home())
         proc = subprocess.Popen(
             cmd,
-            cwd=str(Path.cwd()),
+            cwd=safe_cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1065,7 +1187,7 @@ def api_job_start(payload: JobStartRequest) -> JSONResponse:
             files=[str(f) for f in files],
             input_dir=input_dir,
             output_dir=output_dir,
-            progress=JobProgress(total_files=len(files)),
+            progress=JobProgress(total_files=len(files), job_started_at=time.time()),
         )
         current_job = job
 
@@ -1259,9 +1381,11 @@ def api_llm_job_start(payload: LLMJobStartRequest) -> JSONResponse:
         llm_q_put({"type": "llm_log", "line": "[server] Starting LLM polish job..."})
         llm_q_put({"type": "llm_log", "line": f"[server] Processing {len(files)} files"})
 
+        # Use home directory as cwd to avoid PyTorch import conflicts
+        safe_cwd = str(Path.home())
         proc = subprocess.Popen(
             cmd,
-            cwd=str(Path.cwd()),
+            cwd=safe_cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1355,12 +1479,14 @@ def api_polish_llm(payload: LegacyPolishRequest) -> JSONResponse:
         cmd.append("--dry-run")
 
     try:
+        # Use home directory as cwd to avoid PyTorch import conflicts
+        safe_cwd = str(Path.home())
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=600,  # 10 minutes for LLM processing
-            cwd=str(Path.cwd()),
+            cwd=safe_cwd,
         )
         return JSONResponse(
             {

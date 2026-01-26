@@ -12,13 +12,15 @@ const state = {
   items: [],
   selection: new Set(),
   sse: null,
+  transitionedToLlm: false,
   
   // Pipeline State
   browsingTarget: "input", // "input" | "output"
   pipeline: {
     outputDir: "",
     llmMode: "disabled", // "disabled" | "after_each" | "after_all"
-    llmAvailable: false
+    llmAvailable: false,
+    afterOcr: "llm", // "llm" | "stay"
   },
   
   // Job progress
@@ -27,11 +29,19 @@ const state = {
     fileIndex: 0,
     totalFiles: 0,
     currentFile: "",
+    filePages: 0,
     pagesDone: 0,
     totalPages: 0,
     speed: 0,
     vram: 0,
     eta: "",
+    jobSpeed: 0,
+    jobEta: "",
+    stageName: "",
+    stageCurrent: 0,
+    stageTotal: 0,
+    stageSpeed: 0,
+    stageEta: "",
   },
   
   // Sorting
@@ -115,6 +125,7 @@ function loadPipelineSettings() {
       const p = JSON.parse(saved);
       state.pipeline.outputDir = p.outputDir || "";
       state.pipeline.llmMode = p.llmMode || "disabled";
+      state.pipeline.afterOcr = p.afterOcr || "llm";
     } catch {}
   }
   
@@ -126,6 +137,11 @@ function loadPipelineSettings() {
   for (const r of radios) {
     if (r.value === state.pipeline.llmMode) r.checked = true;
   }
+
+  const afterRadios = document.getElementsByName("afterOcr");
+  for (const r of afterRadios) {
+    if (r.value === state.pipeline.afterOcr) r.checked = true;
+  }
 }
 
 function savePipelineSettings() {
@@ -133,15 +149,18 @@ function savePipelineSettings() {
   
   const radio = document.querySelector('input[name="llmMode"]:checked');
   state.pipeline.llmMode = radio ? radio.value : "disabled";
+
+  const afterRadio = document.querySelector('input[name="afterOcr"]:checked');
+  state.pipeline.afterOcr = afterRadio ? afterRadio.value : "llm";
   
   localStorage.setItem("ocr-pipeline", JSON.stringify(state.pipeline));
 }
 
 async function triggerLlmPolish(files) {
-  if (state.pipeline.llmMode === "disabled") return;
+  if (state.pipeline.llmMode === "disabled") return null;
   if (!state.pipeline.llmAvailable) {
     appendLog("[ui] Skipping auto-polish: LLM offline");
-    return;
+    return null;
   }
   
   // For "after_all" mode, we need to find all files that were just processed
@@ -163,7 +182,7 @@ async function triggerLlmPolish(files) {
         }
       } catch (err) {
         appendLog(`[ui] Failed to get files for polish: ${err.message}`);
-        return;
+        return null;
       }
     }
   } else if (state.pipeline.llmMode === "after_each") {
@@ -181,7 +200,7 @@ async function triggerLlmPolish(files) {
   
   if (filesToPolish.length === 0) {
     appendLog("[ui] No files to polish");
-    return;
+    return null;
   }
   
   appendLog(`[ui] Starting auto-polish for ${filesToPolish.length} file(s)...`);
@@ -199,10 +218,154 @@ async function triggerLlmPolish(files) {
     }
     
     showToast(`LLM polish started for ${filesToPolish.length} file(s)`, "info");
+    if (state.pipeline.afterOcr === "llm" && !state.transitionedToLlm) {
+      beginLlmTransition(filesToPolish, true);
+    }
+    return filesToPolish;
   } catch (err) {
     appendLog(`[ui] Auto-polish error: ${err.message}`);
     showToast(`Auto-polish failed: ${err.message}`, "error");
+    return null;
   }
+}
+
+// =============================================================================
+// Session Persistence + Transition
+// =============================================================================
+
+function saveSessionState() {
+  const session = {
+    inputDir: state.inputDir || el("folderPath").value.trim(),
+    outputDir: el("outputPath").value.trim() || state.outputDir || state.pipeline.outputDir,
+    maxPages: state.maxPages,
+    autoScroll: state.autoScroll,
+    sortColumn: state.sortColumn,
+    sortAsc: state.sortAsc,
+  };
+  StateManager.setJSON(StateManager.KEYS.SESSION, session);
+}
+
+function loadSessionState() {
+  const session = StateManager.getJSON(StateManager.KEYS.SESSION, null);
+  if (!session) return;
+
+  if (session.inputDir) {
+    state.inputDir = session.inputDir;
+    const folderEl = el("folderPath");
+    if (folderEl && !folderEl.value.trim()) folderEl.value = session.inputDir;
+  }
+
+  if (session.outputDir) {
+    state.outputDir = session.outputDir;
+    if (!state.pipeline.outputDir) state.pipeline.outputDir = session.outputDir;
+    const outEl = el("outputPath");
+    if (outEl && !outEl.value.trim()) outEl.value = session.outputDir;
+  }
+
+  if (typeof session.maxPages === "number") {
+    state.maxPages = session.maxPages;
+    const maxEl = el("maxPages");
+    if (maxEl) maxEl.value = String(session.maxPages);
+  }
+
+  if (typeof session.autoScroll === "boolean") {
+    state.autoScroll = session.autoScroll;
+    const autoEl = el("autoScroll");
+    if (autoEl) autoEl.checked = session.autoScroll;
+  }
+
+  if (session.sortColumn) state.sortColumn = session.sortColumn;
+  if (typeof session.sortAsc === "boolean") state.sortAsc = session.sortAsc;
+}
+
+function showTransitionOverlay(message) {
+  const overlay = el("transitionOverlay");
+  const text = el("transitionMessage");
+  if (!overlay || !text) return;
+  text.textContent = message || "Switching to LLM…";
+  overlay.classList.add("active");
+}
+
+function beginLlmTransition(files, autoStart) {
+  const outputDir = el("outputPath").value.trim() || state.outputDir || state.pipeline.outputDir;
+  state.transitionedToLlm = true;
+  StateManager.setTransition({
+    from: "ocr",
+    outputDir,
+    files: files || [],
+    autoStart: Boolean(autoStart),
+  });
+  showTransitionOverlay("Switching to LLM…");
+  setTimeout(() => {
+    window.location.href = "/llm-polish";
+  }, 400);
+}
+
+async function restoreJobStatus() {
+  try {
+    const res = await fetch("/api/job/status");
+    const data = await res.json();
+    if (!data.running) return;
+
+    state.jobRunning = true;
+    el("btnRun").disabled = true;
+    el("btnStop").disabled = false;
+
+    if (data.input_dir && !state.inputDir) state.inputDir = data.input_dir;
+    if (data.output_dir && !state.outputDir) state.outputDir = data.output_dir;
+
+    if (data.progress) {
+      const p = data.progress;
+      state.progress.fileIndex = p.file_index || 0;
+      state.progress.totalFiles = p.total_files || 0;
+      state.progress.currentFile = p.current_file || "";
+      const item = state.items.find((it) => it.name === state.progress.currentFile);
+      state.progress.filePages = item && item.pages ? item.pages : 0;
+      state.progress.pagesDone = p.pages_done || 0;
+      state.progress.totalPages = p.total_pages || 0;
+      state.progress.speed = p.speed || 0;
+      state.progress.vram = p.vram || 0;
+      state.progress.eta = p.eta || "";
+      state.progress.jobSpeed = p.job_speed || p.speed || 0;
+      state.progress.jobEta = p.job_eta || p.eta || "";
+      state.progress.batch_size = p.batch_size || 0;
+      state.progress.stageName = p.stage_name || "";
+      state.progress.stageCurrent = p.stage_current || 0;
+      state.progress.stageTotal = p.stage_total || 0;
+      state.progress.stageSpeed = p.stage_speed || 0;
+      state.progress.stageEta = p.stage_eta || "";
+    }
+
+    updateJobStatus();
+    showMonitorPanel();
+    showOcrPreviewPanel();
+    updateMonitorFromProgress();
+
+    if (state.progress.stageName) {
+      updateOcrPreviewLive(
+        state.progress.stageName,
+        state.progress.stageCurrent,
+        state.progress.stageTotal
+      );
+    }
+
+    appendLog("[ui] Restored running OCR job");
+  } catch {}
+}
+
+async function restoreLlmJobStatus() {
+  try {
+    const res = await fetch("/api/llm/job/status");
+    const data = await res.json();
+    if (!data.running) return;
+
+    if (state.pipeline.afterOcr === "llm") {
+      beginLlmTransition(data.files || [], false);
+      return;
+    }
+
+    showToast("LLM polish is running. Open LLM view to monitor.", "info");
+  } catch {}
 }
 
 // =============================================================================
@@ -324,17 +487,19 @@ function updateMonitorPanel(data) {
 function updateMonitorFromProgress() {
   // Update speed, batch, ETA from progress state
   const p = state.progress;
-  
-  if (p.speed > 0) {
-    el("monitorSpeed").textContent = `${p.speed.toFixed(1)} p/min`;
+
+  const speed = p.jobSpeed > 0 ? p.jobSpeed : p.speed;
+  if (speed > 0) {
+    el("monitorSpeed").textContent = `${speed.toFixed(1)} p/min`;
   }
   
   if (p.batch_size > 0) {
     el("monitorBatch").textContent = String(p.batch_size);
   }
   
-  if (p.eta) {
-    el("monitorEta").textContent = p.eta;
+  const eta = p.jobEta || p.eta;
+  if (eta) {
+    el("monitorEta").textContent = eta;
   }
 }
 
@@ -348,6 +513,20 @@ function showOcrPreviewPanel() {
 
 function hideOcrPreviewPanel() {
   el("ocrPreviewPanel").hidden = true;
+}
+
+function updateOcrPreviewLive(stage, current, total) {
+  // Show live progress during OCR
+  showOcrPreviewPanel();
+  const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+  const pagesInfo = state.progress.filePages > 0
+    ? `File pages: ${state.progress.filePages}`
+    : "";
+  const stageInfo = total > 0
+    ? `Stage progress: ${current}/${total} (${percent}%)`
+    : `Stage progress: ${current}`;
+  el("ocrPreviewInfo").textContent = `${stage} • ${stageInfo}`;
+  el("ocrPreviewText").textContent = `Processing... ${stage}\n\n${stageInfo}${pagesInfo ? "\n" + pagesInfo : ""}\n\nOCR text will appear here when file completes.`;
 }
 
 function updateOcrPreview(data) {
@@ -513,6 +692,7 @@ function handleSort(column) {
   sortItems();
   renderTable();
   updateSortHeaders();
+  saveSessionState();
 }
 
 function updateSortHeaders() {
@@ -657,9 +837,13 @@ function toggleSelectAll() {
 // =============================================================================
 
 async function scan() {
-  const dir = el("folderPath").value.trim();
+  let dir = el("folderPath").value.trim();
   const maxPages = parseInt(el("maxPages").value) || 500;
   state.maxPages = maxPages;
+  if (!dir && state.inputDir) {
+    dir = state.inputDir;
+    el("folderPath").value = dir;
+  }
   
   if (!dir) {
     showToast("Please select a folder first", "error");
@@ -682,6 +866,7 @@ async function scan() {
     state.inputDir = data.input_dir;
     state.outputDir = data.output_dir;
     state.items = data.items || [];
+    saveSessionState();
     
     // Update pipeline output if not set
     if (!el("outputPath").value.trim()) {
@@ -713,19 +898,30 @@ async function startJob() {
     showToast("No files selected", "error");
     return;
   }
+
+  saveSessionState();
   
   el("btnRun").disabled = true;
   el("btnStop").disabled = false;
   state.jobRunning = true;
+  state.transitionedToLlm = false;
   state.progress = {
     fileIndex: 0,
     totalFiles: state.selection.size,
     currentFile: "",
+    filePages: 0,
     pagesDone: 0,
     totalPages: 0,
     speed: 0,
     vram: 0,
     eta: "",
+    jobSpeed: 0,
+    jobEta: "",
+    stageName: "",
+    stageCurrent: 0,
+    stageTotal: 0,
+    stageSpeed: 0,
+    stageEta: "",
     batch_size: 0,
   };
   updateJobStatus();
@@ -816,6 +1012,8 @@ function connectSSE() {
       state.progress.fileIndex = data.file_index;
       state.progress.totalFiles = data.total_files;
       state.progress.currentFile = data.current_file;
+      const item = state.items.find((it) => it.name === state.progress.currentFile);
+      state.progress.filePages = item && item.pages ? item.pages : 0;
       updateJobStatus();
     } catch {}
   });
@@ -835,7 +1033,10 @@ function connectSSE() {
       state.progress.speed = data.speed || 0;
       state.progress.vram = data.vram || 0;
       state.progress.eta = data.eta || "";
+      state.progress.jobSpeed = data.job_speed || data.speed || 0;
+      state.progress.jobEta = data.job_eta || data.eta || "";
       state.progress.batch_size = data.batch_size || 0;
+      if (data.file_pages) state.progress.filePages = data.file_pages;
       updateJobStatus();
       updateMonitorFromProgress(); // Update monitor panel with speed/batch/eta
       
@@ -854,6 +1055,41 @@ function connectSSE() {
     } catch {}
   });
   
+  es.addEventListener("metrics_update", (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      if (data.speed > 0) state.progress.speed = data.speed;
+      if (data.vram > 0) state.progress.vram = data.vram;
+      if (data.eta) state.progress.eta = data.eta;
+      if (data.job_speed > 0) state.progress.jobSpeed = data.job_speed;
+      if (data.job_eta) state.progress.jobEta = data.job_eta;
+      if (!state.progress.jobSpeed && data.speed > 0) state.progress.jobSpeed = data.speed;
+      if (!state.progress.jobEta && data.eta) state.progress.jobEta = data.eta;
+      if (data.batch_size > 0) state.progress.batch_size = data.batch_size;
+      updateMonitorFromProgress();
+    } catch {}
+  });
+  
+  es.addEventListener("tqdm_progress", (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      if (data.stage) state.progress.stageName = data.stage;
+      if (data.stage_name) state.progress.stageName = data.stage_name;
+      if (data.stage_current >= 0) state.progress.stageCurrent = data.stage_current || 0;
+      if (data.stage_total >= 0) state.progress.stageTotal = data.stage_total || 0;
+      if (data.stage_speed >= 0) state.progress.stageSpeed = data.stage_speed || 0;
+      if (data.stage_eta) state.progress.stageEta = data.stage_eta;
+      updateMonitorFromProgress();
+      updateJobStatus();
+      
+      // Update OCR preview with live progress
+      const liveStage = state.progress.stageName || data.stage;
+      if (liveStage) {
+        updateOcrPreviewLive(liveStage, state.progress.stageCurrent, state.progress.stageTotal);
+      }
+    } catch {}
+  });
+  
   es.addEventListener("file_failed", (ev) => {
     try {
       const data = JSON.parse(ev.data);
@@ -861,7 +1097,7 @@ function connectSSE() {
     } catch {}
   });
   
-  es.addEventListener("job_complete", (ev) => {
+  es.addEventListener("job_complete", async (ev) => {
     try {
       const data = JSON.parse(ev.data);
       state.jobRunning = false;
@@ -879,13 +1115,11 @@ function connectSSE() {
       // Auto-polish trigger (batch)
       if (state.pipeline.llmMode === "after_all") {
         appendLog("[ui] Job complete. Triggering batch polish...");
-        // In a real scenario we'd track exactly which files were just done
-        // For now, we assume the user wants to polish what they just selected
-        // (which are now done)
-        // But wait, they are removed from selection when done.
-        // So we can't use state.selection.
-        // We'll just log the intent.
-        triggerLlmPolish([]); 
+        const started = await triggerLlmPolish([]);
+        if (started && state.pipeline.afterOcr === "llm" && !state.transitionedToLlm) {
+          beginLlmTransition(started, true);
+          return;
+        }
       }
       
       // Refresh to get accurate status
@@ -1034,7 +1268,8 @@ function renderBreadcrumbs(path) {
     const crumb = document.createElement("span");
     crumb.className = "crumb";
     crumb.textContent = part;
-    crumb.addEventListener("click", () => browse(accumulated));
+    const pathForThisCrumb = accumulated;  // Capture current value, not reference
+    crumb.addEventListener("click", () => browse(pathForThisCrumb));
     container.appendChild(crumb);
     
     if (i < parts.length - 1) {
@@ -1074,6 +1309,7 @@ function useModalPath() {
   } else {
     el("outputPath").value = p;
     savePipelineSettings();
+    saveSessionState();
   }
   closeModal();
 }
@@ -1217,7 +1453,7 @@ async function runFixMojibake() {
 // Initialization
 // =============================================================================
 
-function init() {
+async function init() {
   // Theme
   initTheme();
   el("btnTheme").addEventListener("click", toggleTheme);
@@ -1244,14 +1480,30 @@ function init() {
   // Load saved settings
   loadSettings();
   loadPipelineSettings();
+  loadSessionState();
+  updateSortHeaders();
   
   // Pipeline settings listeners
-  el("outputPath").addEventListener("change", savePipelineSettings);
+  el("outputPath").addEventListener("change", () => {
+    savePipelineSettings();
+    saveSessionState();
+  });
   el("btnBrowseOutput").addEventListener("click", () => openModal("output"));
   
   const radios = document.getElementsByName("llmMode");
   for (const r of radios) {
-    r.addEventListener("change", savePipelineSettings);
+    r.addEventListener("change", () => {
+      savePipelineSettings();
+      saveSessionState();
+    });
+  }
+
+  const afterRadios = document.getElementsByName("afterOcr");
+  for (const r of afterRadios) {
+    r.addEventListener("change", () => {
+      savePipelineSettings();
+      saveSessionState();
+    });
   }
   
   // Poll VRAM every 2 seconds when settings modal is open
@@ -1291,6 +1543,7 @@ function init() {
   el("btnClearLog").addEventListener("click", clearLog);
   el("autoScroll").addEventListener("change", (e) => {
     state.autoScroll = e.target.checked;
+    saveSessionState();
   });
   
   // Modal controls
@@ -1328,6 +1581,11 @@ function init() {
       scan();
     }
   });
+
+  el("folderPath").addEventListener("change", () => {
+    state.inputDir = el("folderPath").value.trim();
+    saveSessionState();
+  });
   
   // Sortable headers
   $$("th.sortable").forEach(th => {
@@ -1337,21 +1595,32 @@ function init() {
   // Max pages input
   el("maxPages").addEventListener("change", () => {
     state.maxPages = parseInt(el("maxPages").value) || 500;
+    saveSessionState();
   });
   
   // Connect SSE
   connectSSE();
   
-  // Load initial folder
-  fetch("/api/browse")
-    .then(r => r.json())
-    .then(d => {
+  // Load initial folder (prefer saved session)
+  const initialPath = el("folderPath").value.trim();
+  if (initialPath) {
+    await scan();
+  } else {
+    try {
+      const d = await fetch("/api/browse").then(r => r.json());
       el("folderPath").value = d.path;
-      scan();
-    })
-    .catch(() => {
+      await scan();
+    } catch {
       el("folderPath").value = "";
-    });
+    }
+  }
+
+  await restoreJobStatus();
+  await restoreLlmJobStatus();
 }
 
-window.addEventListener("DOMContentLoaded", init);
+window.addEventListener("DOMContentLoaded", () => {
+  init().catch((err) => {
+    console.error(err);
+  });
+});

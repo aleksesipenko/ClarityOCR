@@ -89,6 +89,58 @@ function toggleTheme() {
 }
 
 // =============================================================================
+// Session Persistence + Transition
+// =============================================================================
+
+function saveSessionState(partial) {
+  const session = StateManager.getJSON(StateManager.KEYS.SESSION, {});
+  const next = { ...session, ...partial };
+  StateManager.setJSON(StateManager.KEYS.SESSION, next);
+}
+
+function loadSessionState() {
+  const session = StateManager.getJSON(StateManager.KEYS.SESSION, null);
+  if (!session) return;
+
+  if (session.outputDir) state.outputDir = session.outputDir;
+  if (typeof session.autoScroll === "boolean") state.autoScroll = session.autoScroll;
+  if (session.sortColumn) state.sortColumn = session.sortColumn;
+  if (typeof session.sortAsc === "boolean") state.sortAsc = session.sortAsc;
+
+  const autoEl = el("autoScroll");
+  if (autoEl) autoEl.checked = state.autoScroll;
+}
+
+async function restoreLlmJobStatus() {
+  try {
+    const res = await fetch("/api/llm/job/status");
+    const data = await res.json();
+    if (!data.running) return;
+
+    state.jobRunning = true;
+    el("btnRun").disabled = true;
+    el("btnStop").disabled = false;
+
+    if (data.progress) {
+      const p = data.progress;
+      state.progress.fileIndex = p.file_index || 0;
+      state.progress.totalFiles = p.total_files || 0;
+      state.progress.currentFile = p.current_file || "";
+      state.progress.chunkIndex = p.chunk_index || 0;
+      state.progress.totalChunks = p.total_chunks || 0;
+      state.progress.speed = p.speed_chars_per_sec || p.speed || 0;
+      state.progress.eta = p.eta || "";
+      state.progress.filesModified = p.files_modified || 0;
+    }
+
+    updateJobStatus();
+    el("progressCard").hidden = false;
+    updateProgressPanel();
+    appendLog("[ui] Restored running LLM polish job");
+  } catch {}
+}
+
+// =============================================================================
 // Toast Notifications
 // =============================================================================
 
@@ -435,9 +487,10 @@ function toggleSelectAll() {
 // API Calls
 // =============================================================================
 
-async function loadFiles() {
+async function loadFiles(dirOverride) {
   try {
-    const res = await fetch("/api/files/list");
+    const url = dirOverride ? `/api/files/list?dir=${encodeURIComponent(dirOverride)}` : "/api/files/list";
+    const res = await fetch(url);
     const data = await res.json();
     
     if (data.error) {
@@ -446,6 +499,7 @@ async function loadFiles() {
     }
     
     state.outputDir = data.dir || "";
+    if (state.outputDir) saveSessionState({ outputDir: state.outputDir });
     state.items = data.files || [];
     
     // Default: select unpolished files that are OCR'd
@@ -668,10 +722,17 @@ function connectSSE() {
 // Initialization
 // =============================================================================
 
-function init() {
+async function init() {
+  const transition = StateManager.consumeTransition();
+  if (transition && transition.outputDir) {
+    state.outputDir = transition.outputDir;
+  }
+
   // Theme
   initTheme();
   el("btnTheme").addEventListener("click", toggleTheme);
+
+  loadSessionState();
   
   // Selection buttons
   el("btnSelectAll").addEventListener("click", selectAll);
@@ -684,13 +745,14 @@ function init() {
   el("btnStop").addEventListener("click", stopJob);
   el("btnRefresh").addEventListener("click", () => {
     checkLlmStatus();
-    loadFiles();
+    loadFiles(state.outputDir || undefined);
   });
   
   // Log controls
   el("btnClearLog").addEventListener("click", clearLog);
   el("autoScroll").addEventListener("change", (e) => {
     state.autoScroll = e.target.checked;
+    saveSessionState({ autoScroll: state.autoScroll });
   });
   
   // Sortable headers
@@ -706,6 +768,7 @@ function init() {
       sortItems();
       renderTable();
       updateSortHeaders();
+      saveSessionState({ sortColumn: state.sortColumn, sortAsc: state.sortAsc });
     });
   });
   
@@ -714,7 +777,26 @@ function init() {
   
   // Initial load
   checkLlmStatus();
-  loadFiles();
+  await loadFiles(state.outputDir || undefined);
+  await restoreLlmJobStatus();
+
+  if (transition) {
+    if (transition.files && transition.files.length > 0) {
+      state.selection.clear();
+      for (const filePath of transition.files) {
+        const item = state.items.find(i => i.path === filePath);
+        if (item) state.selection.add(item.path);
+      }
+      renderTable();
+      updateRunButton();
+      appendLog(`[ui] Auto-selected ${state.selection.size} files from OCR`);
+    }
+
+    if (transition.autoStart && state.llmAvailable && state.selection.size > 0) {
+      showToast("Auto-starting LLM polish...", "info");
+      setTimeout(() => startJob(), 800);
+    }
+  }
   
   // Periodic LM Studio check
   setInterval(checkLlmStatus, 30000);
@@ -729,4 +811,8 @@ function updateSortHeaders() {
   });
 }
 
-window.addEventListener("DOMContentLoaded", init);
+window.addEventListener("DOMContentLoaded", () => {
+  init().catch((err) => {
+    console.error(err);
+  });
+});
