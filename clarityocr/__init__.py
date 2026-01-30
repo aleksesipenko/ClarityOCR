@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 ClarityOCR - High-quality PDF to Markdown conversion
 
@@ -6,57 +7,59 @@ Features:
 - LLM post-processing for error correction (LM Studio compatible)
 - Real-time Web UI with progress tracking
 - Optimized for NVIDIA RTX GPUs (16GB VRAM)
+- Apple Silicon (MPS) support with fallback mode
 """
 
 __version__ = "1.0.0"
 __author__ = "ClarityOCR Team"
 
 from typing import Optional
+from pathlib import Path
 
 
 def convert_pdf(pdf_path: str, output_path: Optional[str] = None, **kwargs) -> str:
-    """Convert a single PDF to Markdown.
+    """
+    Convert PDF to plain text (fallback mode).
 
-    This is a convenience wrapper around the converter module.
-    For batch processing or more control, use the CLI or server.
+    This mode uses pypdfium2 for fast, reliable text extraction
+    without the heavy marker-pdf dependency.
 
     Args:
-        pdf_path: Path to the PDF file
-        output_path: Optional output path (defaults to same name with .md extension)
-        **kwargs: Additional options passed to the converter
+        pdf_path: Path to PDF file
+        output_path: Optional output path (defaults to same name with .txt extension)
+        **kwargs: Additional options (currently ignored)
 
     Returns:
-        str: Path to the generated Markdown file
+        str: Path to generated text file
     """
-    from pathlib import Path
-    from .converter import main as converter_main
-    import sys
+    from .simple_converter import extract_text
 
-    # Build arguments for the converter
     pdf = Path(pdf_path)
-    out = Path(output_path) if output_path else pdf.with_suffix(".md")
 
-    # Run converter with these specific files
-    old_argv = sys.argv
-    sys.argv = ["clarityocr-convert", "--pdf", str(pdf), "--output-dir", str(out.parent)]
-    try:
-        converter_main()
-    finally:
-        sys.argv = old_argv
+    # Determine output path
+    if output_path:
+        out = Path(output_path)
+    else:
+        out = pdf.with_suffix(".txt")
 
-    return str(out)
+    # Run fallback converter
+    result = extract_text(pdf, out)
+
+    return result
 
 
 def start_server(host: str = "127.0.0.1", port: int = 8008) -> None:
-    """Start the ClarityOCR Web UI server.
-
-    Args:
-        host: Host to bind to (default: 127.0.0.1)
-        port: Port to listen on (default: 8008)
-    """
+    """Start ClarityOCR Web UI server (fallback mode)."""
     from .server import run_server
 
     run_server(host=host, port=port)
+
+
+def start_server_simple(host: str = "127.0.0.1", port: int = 8009) -> None:
+    """Start simple server for fallback mode."""
+    from .simple_converter import simple_server
+
+    simple_server(host=host, port=port)
 
 
 # Convenience exports
@@ -65,4 +68,5 @@ __all__ = [
     "__author__",
     "convert_pdf",
     "start_server",
+    "start_server_simple",
 ]
