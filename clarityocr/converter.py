@@ -34,6 +34,19 @@ import io
 warnings.filterwarnings("ignore")
 
 # =============================================================================
+# DEVICE UTILITIES
+# =============================================================================
+from .device_utils import (
+    get_device_type,
+    get_device_name,
+    configure_device,
+    get_memory_info,
+    cleanup_device,
+    is_gpu_available,
+    get_torch_device,
+)
+
+# =============================================================================
 # LOGGING SETUP (file-only, doesn't pollute terminal)
 # =============================================================================
 
@@ -197,45 +210,60 @@ def calculate_timeout(page_count: int) -> Optional[int]:
 
 
 def get_gpu_stats() -> Dict[str, Any]:
-    """Get GPU stats via nvidia-smi (works outside of torch context)."""
-    try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-        )
-        if result.returncode == 0:
-            parts = result.stdout.strip().split(",")
-            if len(parts) >= 4:
-                return {
-                    "gpu_util": int(parts[0].strip()),
-                    "vram_used": float(parts[1].strip()) / 1024,  # MB to GB
-                    "vram_total": float(parts[2].strip()) / 1024,
-                    "gpu_temp": int(parts[3].strip()),
-                }
-    except Exception:
-        pass
+    """Get GPU stats (CUDA/MPS)."""
+    device_type = get_device_type()
 
-    # Fallback to torch if nvidia-smi fails
-    if torch.cuda.is_available():
+    # CUDA path: use nvidia-smi if available
+    if device_type == "cuda":
         try:
-            vram_used = torch.cuda.memory_reserved() / 1024**3
-            vram_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            return {
-                "gpu_util": -1,  # Unknown without nvidia-smi
-                "vram_used": round(vram_used, 2),
-                "vram_total": round(vram_total, 2),
-                "gpu_temp": -1,
-            }
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            if result.returncode == 0:
+                parts = result.stdout.strip().split(",")
+                if len(parts) >= 4:
+                    return {
+                        "gpu_util": int(parts[0].strip()),
+                        "vram_used": float(parts[1].strip()) / 1024,  # MB to GB
+                        "vram_total": float(parts[2].strip()) / 1024,
+                        "gpu_temp": int(parts[3].strip()),
+                    }
         except Exception:
             pass
 
+        # Fallback to torch if nvidia-smi fails
+        if torch.cuda.is_available():
+            try:
+                vram_used = torch.cuda.memory_reserved() / 1024**3
+                vram_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                return {
+                    "gpu_util": -1,  # Unknown without nvidia-smi
+                    "vram_used": round(vram_used, 2),
+                    "vram_total": round(vram_total, 2),
+                    "gpu_temp": -1,
+                }
+            except Exception:
+                pass
+
+    # MPS path: use system memory (unified memory)
+    if device_type == "mps":
+        mem = get_memory_info()
+        return {
+            "gpu_util": -1,  # MPS doesn't expose utilization
+            "vram_used": round(mem["used"], 2),
+            "vram_total": round(mem["total"], 2),
+            "gpu_temp": -1,
+        }
+
+    # CPU fallback
     return {"gpu_util": 0, "vram_used": 0, "vram_total": 0, "gpu_temp": 0}
 
 
@@ -401,30 +429,45 @@ class VRAMWatchdog:
         return False
 
 
-def cuda_health_check() -> bool:
-    """Check if CUDA is healthy and responsive."""
-    if not torch.cuda.is_available():
+def device_health_check() -> bool:
+    """Check if device (CUDA/MPS) is healthy and responsive."""
+    if not is_gpu_available():
         return False
+
     try:
+        import torch
+        device = get_torch_device()
         # Quick tensor allocation and sync
-        t = torch.zeros(1, device="cuda")
-        torch.cuda.synchronize()
+        t = torch.zeros(1, device=device)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        elif device == "mps":
+            # MPS doesn't have explicit sync like CUDA
+            pass
         del t
         return True
     except Exception as e:
-        print(f"  [cuda] Health check failed: {e}")
+        device = get_device_type()
+        print(f"  [{device}] Health check failed: {e}")
         return False
 
 
-def cuda_full_cleanup() -> None:
-    """Aggressive CUDA cleanup."""
-    if torch.cuda.is_available():
-        try:
+def device_full_cleanup() -> None:
+    """Aggressive device cleanup (CUDA/MPS)."""
+    if not is_gpu_available():
+        return
+
+    try:
+        device = get_device_type()
+        if device == "cuda":
+            import torch
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
-        except Exception:
-            pass
+        elif device == "mps":
+            cleanup_device()
+    except Exception:
+        pass
     gc.collect()
 
 
@@ -513,9 +556,16 @@ def _conversion_worker(
         from marker.output import text_from_rendered
 
         # Configure CUDA in worker
-        if torch.cuda.is_available():
-            torch.backends.cudnn.benchmark = True
-            torch.backends.cuda.matmul.allow_tf32 = True
+        if is_gpu_available():
+            device = get_device_type()
+            if device == "cuda":
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cuda.matmul.allow_tf32 = True
+            elif device == "mps":
+                try:
+                    torch.backends.mps.allow_tf32 = True
+                except AttributeError:
+                    pass
 
         # Load models in this process
         models = create_model_dict()
@@ -525,8 +575,13 @@ def _conversion_worker(
         # Convert
         rendered = converter(pdf_path)
 
-        if torch.cuda.is_available():
+        # Synchronize device operations
+        device = get_torch_device()
+        if device == "cuda":
             torch.cuda.synchronize()
+        elif device == "mps":
+            # MPS doesn't have explicit sync like CUDA
+            pass
 
         text, metadata, images = text_from_rendered(rendered)
 
@@ -561,10 +616,7 @@ def _conversion_worker(
     finally:
         # Clean up GPU in worker before exit
         try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            cleanup_device()
         except Exception:
             pass
 
@@ -684,21 +736,31 @@ def should_reduce_batch(current_bs: int, min_bs: int = MIN_BATCH_SIZE) -> Tuple[
     return False, current_bs
 
 
-def warmup_cuda() -> None:
-    """Warm up CUDA to avoid cold start delays."""
-    if not torch.cuda.is_available():
+def warmup_device() -> None:
+    """Warm up device (CUDA/MPS) to avoid cold start delays."""
+    if not is_gpu_available():
         return
+
     try:
-        print("  Warming up CUDA...")
+        device = get_torch_device()
+        print(f"  Warming up {device}...")
         # Allocate and free some memory to prime the allocator
         for size in [1, 10, 100]:
-            t = torch.randn(size, size, device="cuda")
+            t = torch.randn(size, size, device=device)
             _ = t @ t
             del t
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        if device == "cuda":
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        elif device == "mps":
+            try:
+                if hasattr(torch.mps, "empty_cache"):
+                    torch.mps.empty_cache()
+            except Exception:
+                pass
     except Exception as e:
-        print(f"  [cuda] Warmup warning: {e}")
+        device_type = get_device_type()
+        print(f"  [{device_type}] Warmup warning: {e}")
 
 
 # ============================================================================
@@ -1000,7 +1062,7 @@ def main():
 
     print("=" * 70)
     print("PDF → Markdown Converter")
-    print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
+    print(f"GPU: {get_device_name()}")
     print(
         f"VRAM: {TOTAL_VRAM_GB - RESERVED_VRAM_GB:.0f}GB available ({RESERVED_VRAM_GB:.0f}GB reserved)"
     )
@@ -1140,15 +1202,15 @@ def main():
                     print(
                         f"  Retrying with batch_size={bs} (layout={current_layout}, recognition={current_recognition})..."
                     )
-                    cuda_full_cleanup()  # Aggressive cleanup before retry
+                    device_full_cleanup()  # Aggressive cleanup before retry
 
                 # Convert with timeout monitoring AND VRAM watchdog
-                # Use multiprocessing for hard timeout (can kill hung CUDA calls)
-                # Check CUDA health before starting
-                if not cuda_health_check():
-                    print("  [cuda] GPU unhealthy, attempting recovery...")
-                    cuda_full_cleanup()
-                    if not cuda_health_check():
+                # Use multiprocessing for hard timeout (can kill hung GPU calls)
+                # Check device health before starting
+                if not device_health_check():
+                    print("  [device] GPU unhealthy, attempting recovery...")
+                    device_full_cleanup()
+                    if not device_health_check():
                         raise RuntimeError("CUDA GPU unresponsive")
 
                 print(f"  Converting with batch_size={bs} (timeout: {timeout_str})...")
@@ -1251,7 +1313,7 @@ def main():
                 timed_out = True
                 log_error(f"  TIMEOUT: {e}")
                 print(f"  [timeout] {e}")
-                cuda_full_cleanup()
+                device_full_cleanup()
                 # Don't continue to smaller batches on timeout - PDF is problematic
                 break
 
@@ -1260,7 +1322,7 @@ def main():
                 log_error(f"  Exception at batch={bs}: {e}")
 
                 # Always clear VRAM before retrying.
-                cuda_full_cleanup()
+                device_full_cleanup()
 
                 # Check if this is VRAM-related (OOM or watchdog abort)
                 error_msg = str(e).lower()
@@ -1268,7 +1330,7 @@ def main():
                     is_cuda_oom(e) or "vram watchdog" in error_msg or "vram overflow" in error_msg
                 )
 
-                if torch.cuda.is_available() and is_vram_issue:
+                if is_gpu_available() and is_vram_issue:
                     log_warning(f"  VRAM issue, will try smaller batch")
                     print(f"  VRAM issue at batch_size={bs}: {e}")
                     continue  # Try smaller batch
@@ -1286,7 +1348,7 @@ def main():
                 print(f"\n✗ FAILED: {last_error}")
 
         # Clean VRAM after each PDF
-        cuda_full_cleanup()
+        device_full_cleanup()
 
     # Stop stats thread and final summary
     stop_stats_thread()

@@ -4,9 +4,13 @@
 # PDF to Markdown conversion (marker-pdf includes surya-ocr)
 marker-pdf>=0.3.0
 
-# PyTorch with CUDA support (install separately for GPU support)
+# PyTorch (supports CUDA for NVIDIA, MPS for Apple Silicon, CPU fallback)
 # For CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# For MPS (Apple Silicon): pip install torch (no special install needed)
 torch>=2.0.0
+
+# System memory monitoring (used for MPS/Apple Silicon support)
+psutil>=5.9.0
 
 # Web UI server
 fastapi>=0.100.0

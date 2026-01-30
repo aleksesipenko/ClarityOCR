@@ -16,14 +16,14 @@ ClarityOCR is a standalone tool for converting PDF documents to clean Markdown t
 ## Requirements
 
 ### Hardware
-- **GPU**: NVIDIA GPU with 8+ GB VRAM (optimized for RTX 4070 Ti SUPER 16GB)
+- **GPU**: NVIDIA GPU with 8+ GB VRAM OR Apple Silicon (M1/M2/M3) for MPS acceleration
 - **RAM**: 16+ GB recommended
 - **Storage**: ~15 GB for models (downloaded automatically)
 
 ### Software
 - Python 3.10-3.12 (3.13+ not supported by PyTorch CUDA yet)
-- CUDA 12.1+ (for GPU acceleration)
-- Windows 10/11 or Linux
+- CUDA 12.1+ (for NVIDIA GPU acceleration) OR macOS 12.3+ (for Apple Silicon MPS)
+- Windows 10/11, Linux, or macOS (Apple Silicon)
 
 ### Optional
 - [LM Studio](https://lmstudio.ai/) for LLM post-processing
@@ -43,6 +43,8 @@ install.bat
 
 ### Manual Install
 
+#### For NVIDIA GPUs (Linux/Windows)
+
 ```bash
 # Create virtual environment
 python -m venv venv
@@ -55,6 +57,22 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 # Install ClarityOCR
 pip install -e .
 ```
+
+#### For Apple Silicon (M1/M2/M3)
+
+```bash
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies for Apple Silicon (includes PyTorch with MPS support)
+pip install -r requirements-apple-silicon.txt
+
+# Install ClarityOCR
+pip install -e .
+```
+
+For detailed Apple Silicon setup, see [README-APPLE-SILICON.md](README-APPLE-SILICON.md).
 
 ## Usage
 

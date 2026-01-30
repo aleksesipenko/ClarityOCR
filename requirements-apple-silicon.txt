@@ -1,0 +1,28 @@
+# ClarityOCR - Apple Silicon Dependencies
+# Install with: pip install -r requirements-apple-silicon.txt
+# Tested on: M1/M2/M3 chips
+
+# PDF to Markdown conversion (marker-pdf includes surya-ocr)
+marker-pdf>=0.3.0
+
+# PyTorch with MPS (Metal Performance Shaders) support for Apple Silicon
+# This version is optimized for M1/M2/M3 chips
+torch>=2.0.0
+
+# System memory monitoring (for MPS)
+psutil>=5.9.0
+
+# Web UI server
+fastapi>=0.100.0
+uvicorn>=0.23.0
+
+# LLM post-processing (LM Studio compatible)
+openai>=1.0.0
+
+# PDF utilities
+pypdfium2>=4.0.0
+
+# Optional: Development dependencies
+# ruff>=0.1.0
+# pytest>=7.0.0
+# mypy>=1.0.0
