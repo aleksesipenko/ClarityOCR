@@ -49,17 +49,10 @@ def convert_pdf(pdf_path: str, output_path: Optional[str] = None, **kwargs) -> s
 
 
 def start_server(host: str = "127.0.0.1", port: int = 8008) -> None:
-    """Start ClarityOCR Web UI server (fallback mode)."""
+    """Start ClarityOCR Web UI server."""
     from .server import run_server
 
     run_server(host=host, port=port)
-
-
-def start_server_simple(host: str = "127.0.0.1", port: int = 8009) -> None:
-    """Start simple server for fallback mode."""
-    from .simple_converter import simple_server
-
-    simple_server(host=host, port=port)
 
 
 # Convenience exports
@@ -68,5 +61,4 @@ __all__ = [
     "__author__",
     "convert_pdf",
     "start_server",
-    "start_server_simple",
 ]

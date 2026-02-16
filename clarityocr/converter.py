@@ -24,7 +24,6 @@ import logging
 from pathlib import Path
 import warnings
 from typing import Optional, Tuple, Dict, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import multiprocessing as mp
 import queue
@@ -121,7 +120,10 @@ if sys.platform == "win32":
     if callable(_reconfigure):
         _reconfigure(encoding="utf-8")
 
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore
 
 # =============================================================================
 # CUDA PERFORMANCE & STABILITY TOGGLES
@@ -152,7 +154,7 @@ except Exception:
 def _detect_vram() -> float:
     """Detect available VRAM in GB."""
     try:
-        if torch.cuda.is_available():
+        if torch is not None and torch.cuda.is_available():
             return torch.cuda.get_device_properties(0).total_memory / 1024**3
     except Exception:
         pass
@@ -773,7 +775,6 @@ def warmup_device() -> None:
 FIXED_LAYOUT_BATCH = 4  # Layout model batch size
 FIXED_RECOGNITION_BATCH = 8  # Text recognition batch size
 FIXED_DETECTION_BATCH = 8  # Object detection batch size
-FIXED_WORKERS = 1  # Single worker (most stable)
 
 # Fallback tiers for OOM recovery (halve sizes on each retry)
 FALLBACK_TIERS = [8, 4, 2]
@@ -784,7 +785,7 @@ FALLBACK_TIERS = [8, 4, 2]
 
 _PAGE_MARKER_BLOCK_RE = re.compile(r"^\{(\d+)\}\s*\n-+\s*$", re.MULTILINE)
 _PAGE_MARKER_LINE_RE = re.compile(r"^\{(\d+)\}\s*$", re.MULTILINE)
-_PAGE_MARKER_ANY_RE = re.compile(r"^\[p:\d+\]", re.MULTILINE)
+_PAGE_MARKER_ANY_RE = re.compile(r"^\[p:(\d+)\]", re.MULTILINE)
 
 # Mojibake detection: Latin-1 interpreted CP1251 produces Unicode codepoints
 # in U+00C0-U+00FF range that look like accented Western European letters.
@@ -838,32 +839,30 @@ def fix_mojibake(text: str) -> str:
 def normalize_page_markers(md_text: str) -> str:
     """Normalize marker pagination markers into stable [p:N] lines."""
 
-    # Marker often emits:
-    #   {12}
-    #   ----------------------------------------
-    # Convert it to a single line: [p:12]
+    # 1. Normalize {N} and {N}--- into [p:N]
     md_text = _PAGE_MARKER_BLOCK_RE.sub(lambda m: f"[p:{m.group(1)}]", md_text)
     md_text = _PAGE_MARKER_LINE_RE.sub(lambda m: f"[p:{m.group(1)}]", md_text)
 
-    # Ensure the document starts with a page marker.
-    # (Some renderers may only insert markers between pages.)
+    # 2. Ensure the document starts with a page marker.
     if not md_text.lstrip().startswith("[p:"):
         md_text = "[p:1]\n\n" + md_text.lstrip("\n")
 
-    # If markers are 0-based, shift to 1-based.
-    markers = _PAGE_MARKER_LINE_RE.findall(md_text)
+    # 3. If markers are 0-based, shift to 1-based.
+    # Use _PAGE_MARKER_ANY_RE here because we already normalized to [p:N]
+    markers = _PAGE_MARKER_ANY_RE.findall(md_text)
     if markers and any(m == "0" for m in markers):
 
         def _shift(m: re.Match[str]) -> str:
             return f"[p:{int(m.group(1)) + 1}]"
 
-        md_text = _PAGE_MARKER_LINE_RE.sub(_shift, md_text)
+        md_text = _PAGE_MARKER_ANY_RE.sub(_shift, md_text)
 
     return md_text
 
 
 def count_page_markers(md_text: str) -> int:
-    markers = _PAGE_MARKER_LINE_RE.findall(md_text)
+    """Count pages based on [p:N] markers."""
+    markers = _PAGE_MARKER_ANY_RE.findall(md_text)
     if not markers:
         return 0
     try:
