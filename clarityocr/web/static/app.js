@@ -51,6 +51,8 @@ const state = {
   // Settings
   maxPages: 500,
   autoScroll: true,
+  ocrPreset: "balanced",
+  parallelCount: 1,
   
   // Theme
   theme: "system", // "light" | "dark" | "system"
@@ -241,6 +243,8 @@ function saveSessionState() {
     autoScroll: state.autoScroll,
     sortColumn: state.sortColumn,
     sortAsc: state.sortAsc,
+    ocrPreset: state.ocrPreset,
+    parallelCount: state.parallelCount,
   };
   StateManager.setJSON(StateManager.KEYS.SESSION, session);
 }
@@ -276,6 +280,15 @@ function loadSessionState() {
 
   if (session.sortColumn) state.sortColumn = session.sortColumn;
   if (typeof session.sortAsc === "boolean") state.sortAsc = session.sortAsc;
+
+  if (session.ocrPreset) {
+      state.ocrPreset = session.ocrPreset;
+      el("ocrPreset").value = session.ocrPreset;
+  }
+  if (session.parallelCount) {
+      state.parallelCount = session.parallelCount;
+      el("parallelCount").value = session.parallelCount;
+  }
 }
 
 function showTransitionOverlay(message) {
@@ -721,8 +734,11 @@ function renderTable() {
 
   for (const it of state.items) {
     const tr = document.createElement("tr");
-    const isDisabled = it.done || it.too_long;
-    if (isDisabled) tr.classList.add("disabled");
+    const isDisabled = (it.done || it.too_long) && !it.done; // Allow selecting done files for export? No, current logic uses it.done for isDisabled
+    // Let's change: isDisabled only if too_long. Done files can be re-processed if selected?
+    // Actually, converter.py skips done files.
+    // So isDisabled = it.done || it.too_long is correct for OCR run.
+    if (it.done || it.too_long) tr.classList.add("disabled");
 
     // Checkbox
     const tdC = document.createElement("td");
@@ -730,7 +746,7 @@ function renderTable() {
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = state.selection.has(it.path);
-    cb.disabled = isDisabled;
+    cb.disabled = it.done || it.too_long;
     cb.addEventListener("change", () => {
       if (cb.checked) state.selection.add(it.path);
       else state.selection.delete(it.path);
@@ -754,11 +770,35 @@ function renderTable() {
     // Status
     const tdS = document.createElement("td");
     tdS.className = "colStatus";
-    const st = fmtStatus(it);
-    const span = document.createElement("span");
-    span.className = `status ${st.cls}`;
-    span.textContent = st.text;
-    tdS.appendChild(span);
+
+    if (it.done) {
+        const btnGroup = document.createElement("div");
+        btnGroup.className = "row";
+        btnGroup.style.gap = "4px";
+
+        const editBtn = document.createElement("button");
+        editBtn.className = "btn btn-sm";
+        editBtn.textContent = "Edit";
+        const mdName = it.name.replace(/\.[^/.]+$/, "") + ".md";
+        const mdPath = (state.pipeline.outputDir || state.outputDir) + "/" + mdName;
+        editBtn.onclick = () => window.location.href = `/editor?file=${encodeURIComponent(mdPath)}`;
+
+        const exportBtn = document.createElement("button");
+        exportBtn.className = "btn btn-sm";
+        exportBtn.textContent = "↑";
+        exportBtn.title = "Export to DOCX/HTML";
+        exportBtn.onclick = () => openExportModal(mdPath);
+
+        btnGroup.appendChild(editBtn);
+        btnGroup.appendChild(exportBtn);
+        tdS.appendChild(btnGroup);
+    } else {
+        const st = fmtStatus(it);
+        const span = document.createElement("span");
+        span.className = `status ${st.cls}`;
+        span.textContent = st.text;
+        tdS.appendChild(span);
+    }
 
     tr.appendChild(tdC);
     tr.appendChild(tdN);
@@ -936,6 +976,8 @@ async function startJob() {
     max_pages: state.maxPages,
     files: Array.from(state.selection),
     auto_fallback: state.settings.autoFallback,
+    parallel: state.parallelCount,
+    preset: state.ocrPreset,
   };
 
   try {
@@ -1394,6 +1436,48 @@ function updatePostprocessStatus(success, message) {
   }
 }
 
+let currentExportFile = "";
+
+function openExportModal(filePath) {
+    currentExportFile = filePath;
+    el("exportModal").hidden = false;
+    el("exportStatus").className = "postprocess-status hidden";
+}
+
+async function runExport() {
+    const format = el("exportFormat").value;
+    const refDoc = el("refDocPath").value.trim();
+    const statusDiv = el("exportStatus");
+
+    statusDiv.textContent = 'Exporting...';
+    statusDiv.className = 'postprocess-status';
+    statusDiv.classList.remove('hidden');
+
+    try {
+        const response = await fetch('/api/v1/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                file: currentExportFile,
+                format: format,
+                reference_doc: refDoc
+            })
+        });
+        const result = await response.json();
+        if (result.ok) {
+            statusDiv.textContent = `Success! Exported to ${result.filename}`;
+            statusDiv.classList.add('success');
+            showToast(`Exported to ${result.filename}`, "success");
+        } else {
+            statusDiv.textContent = `Error: ${result.error}`;
+            statusDiv.classList.add('error');
+        }
+    } catch (err) {
+        statusDiv.textContent = `Error: ${err.message}`;
+        statusDiv.classList.add('error');
+    }
+}
+
 async function runFixMojibake() {
   // Get list of done files
   const doneFiles = state.items
@@ -1597,6 +1681,19 @@ async function init() {
     state.maxPages = parseInt(el("maxPages").value) || 500;
     saveSessionState();
   });
+
+  el("ocrPreset").addEventListener("change", (e) => {
+    state.ocrPreset = e.target.value;
+    saveSessionState();
+  });
+
+  el("parallelCount").addEventListener("change", (e) => {
+    state.parallelCount = parseInt(e.target.value) || 1;
+    saveSessionState();
+  });
+
+  el("btnCloseExport").onclick = () => el("exportModal").hidden = true;
+  el("btnDoExport").onclick = runExport;
   
   // Connect SSE
   connectSSE();

@@ -23,12 +23,14 @@ import threading
 import logging
 from pathlib import Path
 import warnings
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 from datetime import datetime
 import multiprocessing as mp
 import queue
 import traceback
 import io
+import zipfile
+import shutil
 
 warnings.filterwarnings("ignore")
 
@@ -925,6 +927,44 @@ def build_marker_config(layout_bs: int, recognition_bs: int, detection_bs: int):
     ).generate_config_dict()
 
 
+def images_to_pdf(image_paths: List[Path], output_pdf: Path):
+    """Convert a list of images to a single PDF."""
+    from PIL import Image
+    images = []
+    for img_path in image_paths:
+        try:
+            img = Image.open(img_path).convert("RGB")
+            images.append(img)
+        except Exception as e:
+            log_warning(f"Could not open image {img_path}: {e}")
+
+    if not images:
+        raise ValueError("No valid images found to convert to PDF")
+
+    images[0].save(output_pdf, save_all=True, append_images=images[1:])
+
+
+def process_zip_archive(zip_path: Path, temp_dir: Path) -> Path:
+    """Extract images from zip and convert to a single PDF."""
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_dir)
+
+    # Find images
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+    image_paths = sorted([
+        p for p in temp_dir.rglob("*")
+        if p.suffix.lower() in image_exts
+    ])
+
+    if not image_paths:
+        raise ValueError("No images found in zip archive")
+
+    pdf_path = temp_dir / (zip_path.stem + ".pdf")
+    images_to_pdf(image_paths, pdf_path)
+    return pdf_path
+
+
 def get_page_count(pdf_path):
     """Get page count from PDF (handles non-ASCII paths)"""
     pdf_path = Path(pdf_path)
@@ -1006,19 +1046,54 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable automatic batch size reduction on OOM",
     )
+    p.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        help="Number of PDFs to process in parallel",
+    )
+    p.add_argument(
+        "--layout-batch",
+        type=int,
+        default=FIXED_LAYOUT_BATCH,
+        help="Layout model batch size",
+    )
+    p.add_argument(
+        "--recognition-batch",
+        type=int,
+        default=FIXED_RECOGNITION_BATCH,
+        help="Recognition model batch size",
+    )
+    p.add_argument(
+        "--detection-batch",
+        type=int,
+        default=FIXED_DETECTION_BATCH,
+        help="Detection model batch size",
+    )
     return p.parse_args()
 
 
 def scan_pdfs(input_dir: Path, output_dir: Path, max_pages: int) -> int:
+    # PDFs and other supported formats
     pdfs = sorted(input_dir.glob("*.pdf"))
+    zips = sorted(input_dir.glob("*.zip"))
+    img_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+    imgs = sorted([p for p in input_dir.glob("*") if p.suffix.lower() in img_exts])
+
+    all_files = pdfs + zips + imgs
     items = []
-    for pdf in pdfs:
-        md_path = output_dir / f"{pdf.stem}.md"
-        pages = get_page_count(pdf)
+    for f in all_files:
+        md_path = output_dir / f"{f.stem}.md"
+        # For non-PDFs, page count is not easily available without processing
+        if f.suffix.lower() == ".pdf":
+            pages = get_page_count(f)
+        else:
+            pages = 0 # Unknown until conversion
+
         items.append(
             {
-                "name": pdf.name,
-                "path": str(pdf.resolve()),
+                "name": f.name,
+                "path": str(f.resolve()),
                 "pages": pages,
                 "too_long": bool(pages and pages > max_pages),
                 "done": bool(md_path.exists() and output_has_page_markers(md_path)),
@@ -1068,37 +1143,79 @@ def main():
     print("=" * 70)
     print()
 
-    # Find PDFs
+    # Find files
     if selected_pdfs:
         pdfs = [p for p in selected_pdfs if p.exists()]
+        zips = []
+        imgs = []
     else:
         pdfs = sorted(input_dir.glob("*.pdf"))
-    if not pdfs:
-        print("No PDFs found!")
+        zips = sorted(input_dir.glob("*.zip"))
+        img_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+        imgs = sorted([p for p in input_dir.glob("*") if p.suffix.lower() in img_exts])
+
+    all_files = pdfs + zips + imgs
+    if not all_files:
+        print("No files found!")
         return
 
     # Count pages
-    print("Scanning PDFs...")
+    print("Scanning files...")
     pdf_info = []
     skipped = []
     already_done = []
     total_pages = 0
-    for pdf in pdfs:
-        # Skip if already converted
-        output_path = output_dir / f"{pdf.stem}.md"
+
+    temp_root = Path.home() / ".clarityocr" / "temp"
+    if temp_root.exists():
+        try:
+            shutil.rmtree(temp_root)
+        except Exception:
+            pass
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    for original_file in all_files:
+        # Check if already converted
+        output_path = output_dir / f"{original_file.stem}.md"
         if output_path.exists() and output_has_page_markers(output_path):
-            already_done.append(pdf.name)
-            print(f"  {pdf.name[:50]:<50}        [DONE]")
+            already_done.append(original_file.name)
+            print(f"  {original_file.name[:50]:<50}        [DONE]")
             continue
 
-        pages = get_page_count(pdf)
+        is_temp = False
+        work_file = original_file
+
+        if original_file.suffix.lower() == ".zip":
+            print(f"  Processing ZIP: {original_file.name}...")
+            try:
+                work_file = process_zip_archive(original_file, temp_root / original_file.stem)
+                is_temp = True
+            except Exception as e:
+                print(f"  [error] Failed to process ZIP {original_file.name}: {e}")
+                continue
+        elif original_file.suffix.lower() in img_exts:
+            print(f"  Processing Image: {original_file.name}...")
+            try:
+                work_file = temp_root / (original_file.stem + ".pdf")
+                images_to_pdf([original_file], work_file)
+                is_temp = True
+            except Exception as e:
+                print(f"  [error] Failed to process Image {original_file.name}: {e}")
+                continue
+
+        pages = get_page_count(work_file)
         if pages > max_pages:
-            skipped.append((pdf, pages))
-            print(f"  {pdf.name[:50]:<50} {pages:>4} pages  [SKIP: >{max_pages}]")
+            skipped.append((original_file, pages))
+            print(f"  {original_file.name[:50]:<50} {pages:>4} pages  [SKIP: >{max_pages}]")
         else:
-            pdf_info.append((pdf, pages))
+            pdf_info.append({
+                "original_path": original_file,
+                "work_path": work_file,
+                "pages": pages,
+                "is_temp": is_temp
+            })
             total_pages += pages
-            print(f"  {pdf.name[:50]:<50} {pages:>4} pages")
+            print(f"  {original_file.name[:50]:<50} {pages:>4} pages")
 
     print()
     if already_done:
@@ -1113,10 +1230,10 @@ def main():
     # This adds ~20-30s overhead per PDF but enables hard timeout (can kill hung conversions)
     print("Using multiprocessing mode (per-PDF model loading, hard timeout capable)")
 
-    # Use fixed reliable batch configuration (no presets)
-    layout_bs = FIXED_LAYOUT_BATCH
-    recognition_bs = FIXED_RECOGNITION_BATCH
-    detection_bs = FIXED_DETECTION_BATCH
+    # Use batch configuration from args
+    layout_bs = args.layout_batch
+    recognition_bs = args.recognition_batch
+    detection_bs = args.detection_batch
     auto_fallback = not args.no_auto_fallback
 
     print(
@@ -1147,23 +1264,35 @@ def main():
     start_time = time.time()
     peak_vram = 0.0
 
-    for i, (pdf, expected_pages) in enumerate(pdf_info, 1):
-        pdf_name = pdf.name
+    # Support for parallel processing
+    from concurrent.futures import ThreadPoolExecutor
+    max_workers = args.parallel
+
+    results_lock = threading.Lock()
+
+    def process_one_pdf(idx, info):
+        nonlocal processed_pages, processed_pdfs, failed, peak_vram
+
+        pdf = info["work_path"]
+        original_pdf = info["original_path"]
+        expected_pages = info["pages"]
+        pdf_name = original_pdf.name
         short_name = pdf_name[:55] if len(pdf_name) > 55 else pdf_name
 
         # Calculate adaptive timeout for this PDF (None = no timeout)
         timeout_s = calculate_timeout(expected_pages)
         timeout_str = f"{timeout_s}s" if timeout_s else "OFF"
 
-        log_info(f"PDF [{i}/{len(pdf_info)}] {pdf_name}")
+        log_info(f"PDF [{idx}/{len(pdf_info)}] {pdf_name}")
         log_debug(f"  Expected pages: {expected_pages}, Timeout: {timeout_str}")
 
-        print(f"\n{'─' * 70}")
-        print(f"[{i}/{len(pdf_info)}] {short_name}")
-        print(
-            f"Pages: {expected_pages} | Progress: {processed_pages}/{total_pages} total | Timeout: {timeout_str}"
-        )
-        print(f"{'─' * 70}")
+        with _print_lock:
+            print(f"\n{'─' * 70}")
+            print(f"[{idx}/{len(pdf_info)}] {short_name}")
+            print(
+                f"Pages: {expected_pages} | Progress: {processed_pages}/{total_pages} total | Timeout: {timeout_str}"
+            )
+            print(f"{'─' * 70}")
 
         pdf_start = time.time()
 
@@ -1238,17 +1367,19 @@ def main():
                 page_time = pdf_time / actual_pages if actual_pages > 0 else pdf_time
 
                 # Update stats
-                processed_pdfs += 1
-                processed_pages += actual_pages
-                for _ in range(actual_pages):
-                    page_times.append(page_time)
+                with results_lock:
+                    processed_pdfs += 1
+                    processed_pages += actual_pages
+                    for _ in range(actual_pages):
+                        page_times.append(page_time)
 
                 # Track VRAM
                 vram = get_vram_usage()
-                peak_vram = max(peak_vram, vram)
+                with results_lock:
+                    peak_vram = max(peak_vram, vram)
 
                 # Save
-                output_path = output_dir / f"{pdf.stem}.md"
+                output_path = output_dir / f"{original_pdf.stem}.md"
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(text)
 
@@ -1256,7 +1387,7 @@ def main():
 
                 # Save images (handle both bytes and PIL.Image objects)
                 if images:
-                    img_dir = output_dir / pdf.stem
+                    img_dir = output_dir / original_pdf.stem
                     img_dir.mkdir(exist_ok=True)
                     saved_images = 0
                     for img_name, img_data in images.items():
@@ -1281,20 +1412,22 @@ def main():
 
                 # Progress summary
                 elapsed_total = time.time() - start_time
-                avg_page = sum(page_times) / len(page_times) if page_times else 0
-                remaining_pages = total_pages - processed_pages
-                eta = remaining_pages * avg_page
-                pages_per_min = processed_pages / (elapsed_total / 60) if elapsed_total > 0 else 0
+                with results_lock:
+                    avg_page = sum(page_times) / len(page_times) if page_times else 0
+                    remaining_pages = total_pages - processed_pages
+                    eta = remaining_pages * avg_page
+                    pages_per_min = processed_pages / (elapsed_total / 60) if elapsed_total > 0 else 0
 
-                print()
-                print(f"✓ DONE: {actual_pages} pages in {pdf_time:.1f}s ({page_time:.2f}s/page)")
-                print(
-                    f"  Total: {processed_pages}/{total_pages} pages | "
-                    f"Speed: {pages_per_min:.1f} p/min | "
-                    f"VRAM: {vram:.1f}GB | "
-                    f"ETA: {format_time(eta)} | "
-                    f"batch={bs}"
-                )
+                with _print_lock:
+                    print()
+                    print(f"✓ DONE: {actual_pages} pages in {pdf_time:.1f}s ({page_time:.2f}s/page)")
+                    print(
+                        f"  Total: {processed_pages}/{total_pages} pages | "
+                        f"Speed: {pages_per_min:.1f} p/min | "
+                        f"VRAM: {vram:.1f}GB | "
+                        f"ETA: {format_time(eta)} | "
+                        f"batch={bs}"
+                    )
 
                 log_info(
                     f"  SUCCESS: {actual_pages} pages in {pdf_time:.1f}s ({page_time:.2f}s/page)"
@@ -1311,7 +1444,8 @@ def main():
                 last_error = e
                 timed_out = True
                 log_error(f"  TIMEOUT: {e}")
-                print(f"  [timeout] {e}")
+                with _print_lock:
+                    print(f"  [timeout] {e}")
                 device_full_cleanup()
                 # Don't continue to smaller batches on timeout - PDF is problematic
                 break
@@ -1331,23 +1465,31 @@ def main():
 
                 if is_gpu_available() and is_vram_issue:
                     log_warning(f"  VRAM issue, will try smaller batch")
-                    print(f"  VRAM issue at batch_size={bs}: {e}")
+                    with _print_lock:
+                        print(f"  VRAM issue at batch_size={bs}: {e}")
                     continue  # Try smaller batch
 
                 # Non-VRAM error: still try smaller batches once
-                print(f"  Error at batch_size={bs}: {e}")
+                with _print_lock:
+                    print(f"  Error at batch_size={bs}: {e}")
                 continue
 
         if not success:
-            failed += 1
+            with results_lock:
+                failed += 1
             log_error(f"  FAILED: {last_error}")
-            if timed_out:
-                print(f"\n✗ TIMEOUT: PDF conversion exceeded time limit")
-            else:
-                print(f"\n✗ FAILED: {last_error}")
+            with _print_lock:
+                if timed_out:
+                    print(f"\n✗ TIMEOUT: PDF conversion exceeded time limit")
+                else:
+                    print(f"\n✗ FAILED: {last_error}")
 
         # Clean VRAM after each PDF
         device_full_cleanup()
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for i, info in enumerate(pdf_info, 1):
+            executor.submit(process_one_pdf, i, info)
 
     # Stop stats thread and final summary
     stop_stats_thread()
