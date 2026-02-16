@@ -889,17 +889,14 @@ def output_has_page_markers(md_path: Path) -> bool:
 
 
 def get_vram_usage():
-    """Get current VRAM usage in GB"""
-    if torch.cuda.is_available():
-        return torch.cuda.memory_reserved() / 1024**3
-    return 0.0
+    """Get current VRAM usage in GB (CUDA/MPS)"""
+    stats = get_gpu_stats()
+    return stats.get("vram_used", 0.0)
 
 
 def clear_vram():
-    """Clear CUDA cache"""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        gc.collect()
+    """Clear device cache (CUDA/MPS)"""
+    device_full_cleanup()
 
 
 def is_cuda_oom(exc: Exception) -> bool:

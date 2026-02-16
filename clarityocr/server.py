@@ -165,10 +165,27 @@ _gpu_poll_interval = 2.0  # Poll every 2 seconds
 
 
 def gpu_poll_worker():
-    """Background thread that continuously polls GPU stats via nvidia-smi."""
+    """Background thread that continuously polls GPU stats (CUDA/MPS)."""
+    from .device_utils import get_device_type, get_memory_info, get_device_name
+
     while not _gpu_poll_stop.is_set():
         try:
-            stats = get_gpu_stats_nvidia_smi()
+            device_type = get_device_type()
+            stats = {"available": False}
+
+            if device_type == "cuda":
+                stats = get_gpu_stats_nvidia_smi()
+            elif device_type == "mps":
+                mem = get_memory_info()
+                stats = {
+                    "gpu_util": -1,
+                    "vram_used": round(mem["used"], 2),
+                    "vram_total": round(mem["total"], 2),
+                    "gpu_temp": -1,
+                    "name": get_device_name(),
+                    "available": True
+                }
+
             if stats.get("available"):
                 update_gpu_stats_cache(stats)
                 # Emit SSE event if job is running
