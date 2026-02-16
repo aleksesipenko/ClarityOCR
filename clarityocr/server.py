@@ -279,10 +279,20 @@ def is_path_safe(path: Path, allowed_roots: list[Path] | None = None) -> bool:
         "/usr",
         "/bin",
         "/sbin",
+        "/lib",
+        "/root",
+        "/boot",
+        "/dev",
+        "/sys",
+        "/proc",
         ".ssh",
         ".gnupg",
         ".aws",
         ".azure",
+        ".config",
+        ".env",
+        "node_modules",
+        "__pycache__",
     ]
     resolved_str = str(resolved).lower()
     for pattern in sensitive_patterns:

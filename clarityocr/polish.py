@@ -35,8 +35,7 @@ from typing import Generator
 try:
     from openai import OpenAI
 except ImportError:
-    print("ERROR: openai package not found. Install with: pip install openai")
-    sys.exit(1)
+    OpenAI = None  # type: ignore
 
 
 # =============================================================================
@@ -308,8 +307,8 @@ def create_chunks(
             # If adding this block exceeds limit, yield current chunk first
             if current_chunk_parts and current_tokens + block_tokens > chunk_size:
                 chunk_text = "\n".join(current_chunk_parts)
-                if estimate_tokens(chunk_text) >= min_size:
-                    yield chunk_text, chunk_start_char, current_char
+                # Yield even if small to avoid data loss
+                yield chunk_text, chunk_start_char, current_char
                 current_chunk_parts = []
                 current_tokens = 0
                 chunk_start_char = current_char
@@ -318,8 +317,7 @@ def create_chunks(
             if block_tokens > chunk_size:
                 if current_chunk_parts:
                     chunk_text = "\n".join(current_chunk_parts)
-                    if estimate_tokens(chunk_text) >= min_size:
-                        yield chunk_text, chunk_start_char, current_char
+                    yield chunk_text, chunk_start_char, current_char
                     current_chunk_parts = []
                     current_tokens = 0
                 yield block_text, current_char, current_char + block_len
@@ -358,8 +356,7 @@ def create_chunks(
                 if current_chunk_parts:
                     # Yield current chunk before splitting
                     chunk_text = "\n".join(current_chunk_parts)
-                    if estimate_tokens(chunk_text) >= min_size:
-                        yield chunk_text, chunk_start_char, remaining_start
+                    yield chunk_text, chunk_start_char, remaining_start
                     current_chunk_parts = []
                     current_tokens = 0
                     chunk_start_char = remaining_start
@@ -390,8 +387,7 @@ def create_chunks(
                 if chunk_part:
                     current_chunk_parts.append(chunk_part)
                     chunk_text = "\n".join(current_chunk_parts)
-                    if estimate_tokens(chunk_text) >= min_size:
-                        yield chunk_text, chunk_start_char, remaining_start + split_pos
+                    yield chunk_text, chunk_start_char, remaining_start + split_pos
                     current_chunk_parts = []
                     current_tokens = 0
 
@@ -412,10 +408,12 @@ def create_chunks(
 def merge_chunks(chunks: list[str], overlap: int = 100) -> str:
     """Merge chunks back together.
 
-    Uses single newline to prevent inserting paragraph breaks between
-    sentences that were split across chunk boundaries.
+    Currently uses simple join since create_chunks uses sentence boundaries.
+    If real overlap is implemented in create_chunks, this should be updated
+    to stitch chunks together.
     """
-    return "\n".join(chunks)
+    # Filter out empty chunks and join with newline
+    return "\n".join([c for c in chunks if c.strip()])
 
 
 # =============================================================================
@@ -425,6 +423,8 @@ def merge_chunks(chunks: list[str], overlap: int = 100) -> str:
 
 def create_client(config: PolishConfig) -> OpenAI:
     """Create OpenAI client configured for LM Studio."""
+    if OpenAI is None:
+        raise ImportError("openai package not found. Install with: pip install openai")
     return OpenAI(base_url=config.base_url, api_key=config.api_key, timeout=config.timeout)
 
 
