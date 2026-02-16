@@ -12,6 +12,17 @@ ClarityOCR is a standalone tool for converting PDF documents to clean Markdown t
 - **Batch Processing**: Convert multiple PDFs with automatic queue management
 - **Smart Page Markers**: Stable `[p:N]` markers for citation references
 - **Encoding Fix**: Automatic mojibake detection and repair (CP1251/Latin-1)
+- **Batch Processing**: Support for ZIP archives and multiple images
+- **Multi-format Export**: Export to DOCX and HTML via Pandoc
+- **AI Agent API**: Versioned REST API with Basic Auth for integration
+- **Docker Support**: One-click deployment for NVIDIA GPUs
+
+## Docker Quick Start (Recommended)
+
+```bash
+docker-compose up -d
+```
+Access the UI at `http://localhost:8008`. See [API_GUIDE.md](API_GUIDE.md) for automation.
 
 ## Requirements
 

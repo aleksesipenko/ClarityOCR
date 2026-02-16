@@ -27,11 +27,45 @@ from typing import Any, Optional, Callable
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
+
+
+# =============================================================================
+# PRESETS
+# =============================================================================
+
+PRESETS = {
+    "speed": {"layout": 2, "recognition": 4, "detection": 4},
+    "balanced": {"layout": 4, "recognition": 8, "detection": 8},
+    "quality": {"layout": 8, "recognition": 16, "detection": 16},
+}
+
+# =============================================================================
+# AUTHENTICATION
+# =============================================================================
+
+security = HTTPBasic(auto_error=False)
+
+def get_current_user(credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    api_user = os.getenv("API_USER")
+    api_pass = os.getenv("API_PASSWORD")
+
+    # If no auth configured, allow access
+    if not api_user or not api_pass:
+        return "anonymous"
+
+    if credentials is None or credentials.username != api_user or credentials.password != api_pass:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 
 # =============================================================================
@@ -42,11 +76,13 @@ from pydantic import BaseModel, Field
 class JobStartRequest(BaseModel):
     """Request body for /api/job/start endpoint."""
 
-    files: list[str] = Field(..., min_length=1, description="List of PDF file paths to process")
+    files: list[str] = Field(..., min_length=1, description="List of file paths (PDF, ZIP, images) to process")
     input_dir: str | None = Field(None, description="Input directory path")
     output_dir: str | None = Field(None, description="Output directory path")
     max_pages: int = Field(500, ge=1, le=10000, description="Maximum pages per PDF")
     auto_fallback: bool = Field(True, description="Enable automatic batch size reduction on OOM")
+    parallel: int = Field(1, ge=1, le=8, description="Number of files to process in parallel")
+    preset: str = Field("balanced", description="OCR preset: speed, balanced, quality")
 
 
 class LLMJobStartRequest(BaseModel):
@@ -60,6 +96,26 @@ class LLMJobStartRequest(BaseModel):
     chunk_size: int = Field(800, ge=100, le=4000, description="Chunk size in tokens")
     max_tokens: int = Field(4096, ge=256, le=32000, description="Max output tokens")
     dry_run: bool = Field(False, description="Preview mode without saving")
+
+
+class ExportRequest(BaseModel):
+    """Request body for /api/v1/export endpoint."""
+
+    file: str = Field(..., description="Path to Markdown file")
+    format: str = Field("docx", description="Output format: docx, html")
+    reference_doc: str | None = Field(None, description="Path to reference DOCX for styling")
+    options: dict = Field(default_factory=dict, description="Formatting options (font, size, margins)")
+
+
+class FileReadRequest(BaseModel):
+    """Request to read a file."""
+    path: str
+
+
+class FileSaveRequest(BaseModel):
+    """Request to save a file."""
+    path: str
+    content: str
 
 
 class MojibakeFixRequest(BaseModel):
@@ -209,7 +265,7 @@ def output_has_page_markers(md_path: Path) -> bool:
         return False
 
 
-def pdf_page_count(pdf_path: Path) -> int:
+def get_page_count(pdf_path: Path) -> int:
     try:
         import pypdfium2 as pdfium
 
@@ -998,6 +1054,12 @@ def llm_polish_page() -> FileResponse:
     return FileResponse(str(_static_path / "llm-polish.html"))
 
 
+@app.get("/editor")
+def editor_page() -> FileResponse:
+    """Serve the Markdown Editor page."""
+    return FileResponse(str(_static_path / "editor.html"))
+
+
 @app.get("/api/browse")
 def api_browse(path: Optional[str] = None) -> JSONResponse:
     # Handle empty or whitespace path
@@ -1050,7 +1112,10 @@ def api_browse(path: Optional[str] = None) -> JSONResponse:
 
 @app.get("/api/scan")
 def api_scan(
-    dir: Optional[str] = None, output_dir: Optional[str] = None, max_pages: int = 500
+    dir: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    max_pages: int = 500,
+    user: str = Depends(get_current_user)
 ) -> JSONResponse:
     input_dir = Path(dir) if dir else default_sources_dir()
     out_dir = Path(output_dir) if output_dir else default_output_dir()
@@ -1072,22 +1137,33 @@ def api_scan(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Supported formats
     pdfs = sorted(input_dir.glob("*.pdf"))
+    zips = sorted(input_dir.glob("*.zip"))
+    img_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+    imgs = sorted([p for p in input_dir.glob("*") if p.suffix.lower() in img_exts])
+
+    all_files = pdfs + zips + imgs
+
     items: list[dict[str, Any]] = []
     total_pages = 0
     pending_count = 0
 
-    for pdf in pdfs:
-        pages = pdf_page_count(pdf)
-        md_path = out_dir / f"{pdf.stem}.md"
+    for f in all_files:
+        if f.suffix.lower() == ".pdf":
+            pages = get_page_count(f)
+        else:
+            pages = 0 # Unknown for ZIP/Images until processed
+
+        md_path = out_dir / f"{f.stem}.md"
         done = bool(md_path.exists() and output_has_page_markers(md_path))
         polished = bool(done and is_file_polished(md_path))
         too_long = bool(pages and pages > max_pages)
 
         items.append(
             {
-                "name": pdf.name,
-                "path": str(pdf.resolve()),
+                "name": f.name,
+                "path": str(f.resolve()),
                 "pages": pages,
                 "done": done,
                 "polished": polished,
@@ -1134,12 +1210,23 @@ def api_job_status() -> JSONResponse:
 
 
 @app.post("/api/job/start")
-def api_job_start(payload: JobStartRequest) -> JSONResponse:
-    input_dir = str(payload.input_dir or default_sources_dir())
-    output_dir = str(payload.output_dir or default_output_dir())
+def api_job_start(
+    payload: JobStartRequest,
+    user: str = Depends(get_current_user)
+) -> JSONResponse:
+    input_dir_path = Path(payload.input_dir or default_sources_dir())
+    output_dir_path = Path(payload.output_dir or default_output_dir())
+
+    if not is_path_safe(input_dir_path) or not is_path_safe(output_dir_path):
+        raise HTTPException(status_code=403, detail="Access denied: paths not allowed")
+
+    input_dir = str(input_dir_path)
+    output_dir = str(output_dir_path)
     max_pages = payload.max_pages
     files = payload.files
     auto_fallback = payload.auto_fallback
+    parallel = payload.parallel
+    preset = payload.preset
 
     py = get_python_executable()
 
@@ -1158,7 +1245,18 @@ def api_job_start(payload: JobStartRequest) -> JSONResponse:
             output_dir,
             "--max-pages",
             str(max_pages),
+            "--parallel",
+            str(parallel),
         ]
+
+        # Apply preset batch sizes
+        p_vals = PRESETS.get(preset, PRESETS["balanced"])
+        cmd += [
+            "--layout-batch", str(p_vals["layout"]),
+            "--recognition-batch", str(p_vals["recognition"]),
+            "--detection-batch", str(p_vals["detection"]),
+        ]
+
         # Add auto-fallback control if specified
         if not auto_fallback:
             cmd += ["--no-auto-fallback"]
@@ -1297,6 +1395,96 @@ def api_config() -> JSONResponse:
 # POST-PROCESSING ENDPOINTS (LLM Polish)
 # =============================================================================
 
+@app.get("/api/v1/file/read")
+def api_file_read(
+    path: str,
+    user: str = Depends(get_current_user)
+) -> JSONResponse:
+    """Read file content."""
+    p = Path(path)
+    if not is_path_safe(p):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        content = p.read_text(encoding="utf-8")
+        return JSONResponse({"content": content})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/file/save")
+def api_file_save(
+    payload: FileSaveRequest,
+    user: str = Depends(get_current_user)
+) -> JSONResponse:
+    """Save file content."""
+    p = Path(payload.path)
+    if not is_path_safe(p):
+        raise HTTPException(status_code=403, detail="Access denied")
+    try:
+        p.write_text(payload.content, encoding="utf-8")
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/export")
+def api_export(
+    payload: ExportRequest,
+    user: str = Depends(get_current_user)
+) -> JSONResponse:
+    """Export Markdown to DOCX or HTML using pandoc."""
+    md_path = Path(payload.file)
+    fmt = payload.format.lower()
+
+    if not is_path_safe(md_path):
+        raise HTTPException(status_code=403, detail="Access denied: file path not allowed")
+
+    if not md_path.exists():
+        raise HTTPException(status_code=404, detail="Markdown file not found")
+
+    if fmt not in ("docx", "html"):
+        raise HTTPException(status_code=400, detail="Unsupported format. Use 'docx' or 'html'")
+
+    out_path = md_path.with_suffix(f".{fmt}")
+
+    # Check if pandoc is available
+    try:
+        subprocess.run(["pandoc", "--version"], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        raise HTTPException(status_code=501, detail="Pandoc not installed on server. DOCX export unavailable.")
+
+    # Build pandoc command
+    cmd = ["pandoc", str(md_path), "-o", str(out_path)]
+
+    if payload.reference_doc:
+        ref_path = Path(payload.reference_doc)
+        if not is_path_safe(ref_path):
+            raise HTTPException(status_code=403, detail="Access denied: reference doc path not allowed")
+        if ref_path.exists():
+            cmd += ["--reference-doc", str(ref_path)]
+
+    # Add variables from options
+    for k, v in payload.options.items():
+        if isinstance(v, (str, int, float)):
+            cmd += ["-V", f"{k}={v}"]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        return JSONResponse({
+            "ok": True,
+            "format": fmt,
+            "path": str(out_path.resolve()),
+            "filename": out_path.name
+        })
+    except subprocess.CalledProcessError as e:
+        return JSONResponse({
+            "ok": False,
+            "error": e.stderr.decode()
+        }, status_code=500)
+
+
 
 @app.post("/api/postprocess/fix-mojibake")
 def api_fix_mojibake(payload: MojibakeFixRequest) -> JSONResponse:
@@ -1356,9 +1544,16 @@ def api_llm_job_status() -> JSONResponse:
 
 
 @app.post("/api/llm/job/start")
-def api_llm_job_start(payload: LLMJobStartRequest) -> JSONResponse:
+def api_llm_job_start(
+    payload: LLMJobStartRequest,
+    user: str = Depends(get_current_user)
+) -> JSONResponse:
     """Start LLM polish job for specified files."""
     files = payload.files
+
+    for f in files:
+        if not is_path_safe(Path(f)):
+            raise HTTPException(status_code=403, detail=f"Access denied: file path not allowed: {f}")
     base_url = payload.base_url
     dry_run = payload.dry_run
 
@@ -1512,9 +1707,15 @@ def api_polish_llm(payload: LegacyPolishRequest) -> JSONResponse:
 
 
 @app.get("/api/files/list")
-def api_files_list(dir: Optional[str] = None) -> JSONResponse:
+def api_files_list(
+    dir: Optional[str] = None,
+    user: str = Depends(get_current_user)
+) -> JSONResponse:
     """List converted markdown files with stats."""
     out_dir = Path(dir) if dir else default_output_dir()
+
+    if not is_path_safe(out_dir):
+        raise HTTPException(status_code=403, detail="Access denied")
 
     if not out_dir.exists():
         return JSONResponse({"files": [], "error": "Directory not found"})

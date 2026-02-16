@@ -50,6 +50,18 @@
           <button id="btnSelectNew" class="btn">Select pending</button>
           <div class="spacer"></div>
           <div class="stats" id="stats"></div>
+          <div class="inline-control">
+            <label class="label-sm">Parallel</label>
+            <input id="parallelCount" class="input-sm" type="number" value="1" min="1" max="8" />
+          </div>
+          <div class="inline-control">
+            <label class="label-sm">Preset</label>
+            <select id="ocrPreset" class="input-sm" style="width: 100px;">
+              <option value="speed">Speed</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="quality">Quality</option>
+            </select>
+          </div>
           <button id="btnRun" class="btn primary">Run OCR</button>
           <button id="btnStop" class="btn danger" disabled>Stop</button>
         </div>
@@ -219,6 +231,37 @@
           </div>
           <div class="browse-error" id="browseError"></div>
           <div class="browseList" id="browseList"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Export Modal -->
+    <div class="modal" id="exportModal" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modalCard export-modal">
+        <div class="modalHead">
+          <div class="h2">Export Document</div>
+          <div class="row">
+            <button id="btnCloseExport" class="btn">Cancel</button>
+          </div>
+        </div>
+        <div class="modalBody">
+          <div class="row settings-row">
+            <label class="label">Format</label>
+            <select id="exportFormat" class="input">
+              <option value="docx">Microsoft Word (.docx)</option>
+              <option value="html">HTML Web Page (.html)</option>
+            </select>
+          </div>
+          <div class="row settings-row" id="refDocRow">
+            <label class="label">Style Doc</label>
+            <input id="refDocPath" class="input" type="text" placeholder="Path to reference.docx (optional)" />
+          </div>
+          <div class="row row-actions">
+            <div class="spacer"></div>
+            <button id="btnDoExport" class="btn primary">Export Now</button>
+          </div>
+          <div id="exportStatus" class="postprocess-status hidden"></div>
         </div>
       </div>
     </div>

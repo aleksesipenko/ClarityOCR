@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  clarityocr:
+    build: .
+    image: clarityocr:latest
+    container_name: clarityocr
+    ports:
+      - "8008:8008"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      # Mount inputs/outputs to host for easy access
+      - ./inputs:/app/inputs
+      - ./output:/app/output
+      # Persistent cache for models (~15GB)
+      - clarityocr_models:/root/.cache/huggingface
+      # Persistent logs
+      - clarityocr_logs:/root/.clarityocr/logs
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    restart: unless-stopped
+
+volumes:
+  clarityocr_models:
+    name: clarityocr_models
+  clarityocr_logs:
+    name: clarityocr_logs
