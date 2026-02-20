@@ -1265,6 +1265,14 @@ def api_job_start(
 
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
+        
+        # Add project root to PYTHONPATH so clarityocr module can be found
+        # especially since we change cwd to Path.home()
+        project_root = str(package_root().parent)
+        if "PYTHONPATH" in env:
+            env["PYTHONPATH"] = f"{project_root}{os.pathsep}{env["PYTHONPATH"]}"
+        else:
+            env["PYTHONPATH"] = project_root
 
         q_put({"type": "log", "line": "[server] starting OCR job..."})
         q_put(

@@ -1144,6 +1144,7 @@ def main():
     print()
 
     # Find files
+    img_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
     if selected_pdfs:
         pdfs = [p for p in selected_pdfs if p.exists()]
         zips = []
@@ -1151,7 +1152,6 @@ def main():
     else:
         pdfs = sorted(input_dir.glob("*.pdf"))
         zips = sorted(input_dir.glob("*.zip"))
-        img_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
         imgs = sorted([p for p in input_dir.glob("*") if p.suffix.lower() in img_exts])
 
     all_files = pdfs + zips + imgs
