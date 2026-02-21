@@ -87,7 +87,7 @@ def cmd_scan(args):
     from pathlib import Path
 
     input_dir = Path(args.directory)
-    output_dir = Path(args.output_dir) if args.output_dir else input_dir / "md"
+    output_dir = Path(args.output_dir) if args.output_dir else input_dir / "output"
 
     return scan_pdfs(input_dir, output_dir, args.max_pages)
 

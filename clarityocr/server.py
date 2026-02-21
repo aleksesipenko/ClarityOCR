@@ -135,6 +135,20 @@ class LegacyPolishRequest(BaseModel):
 APP_HOST = "127.0.0.1"
 APP_PORT = 8008
 
+
+def get_cors_origins() -> list[str]:
+    """Resolve allowed CORS origins from env.
+
+    CORS_ORIGINS supports comma-separated values. If unset, defaults to local UI origins.
+    """
+    raw = os.getenv("CORS_ORIGINS", "").strip()
+    if raw:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return [
+        "http://127.0.0.1:8008",
+        "http://localhost:8008",
+    ]
+
 # =============================================================================
 # POLISHED FILE TRACKING
 # =============================================================================
@@ -1033,7 +1047,7 @@ app = FastAPI(lifespan=lifespan)
 # CORS middleware for cross-origin requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (adjust for production if needed)
+    allow_origins=get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1061,7 +1075,7 @@ def editor_page() -> FileResponse:
 
 
 @app.get("/api/browse")
-def api_browse(path: Optional[str] = None) -> JSONResponse:
+def api_browse(path: Optional[str] = None, user: str = Depends(get_current_user)) -> JSONResponse:
     # Handle empty or whitespace path
     if path is not None:
         path = path.strip()
@@ -1188,7 +1202,7 @@ def api_scan(
 
 
 @app.get("/api/job/status")
-def api_job_status() -> JSONResponse:
+def api_job_status(user: str = Depends(get_current_user)) -> JSONResponse:
     with job_lock:
         if current_job is None:
             return JSONResponse({"running": False})
@@ -1270,7 +1284,7 @@ def api_job_start(
         # especially since we change cwd to Path.home()
         project_root = str(package_root().parent)
         if "PYTHONPATH" in env:
-            env["PYTHONPATH"] = f"{project_root}{os.pathsep}{env["PYTHONPATH"]}"
+            env["PYTHONPATH"] = f"{project_root}{os.pathsep}{env['PYTHONPATH']}"
         else:
             env["PYTHONPATH"] = project_root
 
@@ -1314,7 +1328,7 @@ def api_job_start(
 
 
 @app.post("/api/job/stop")
-def api_job_stop() -> JSONResponse:
+def api_job_stop(user: str = Depends(get_current_user)) -> JSONResponse:
     with job_lock:
         global current_job
         if current_job is None:
@@ -1330,7 +1344,7 @@ def api_job_stop() -> JSONResponse:
 
 
 @app.get("/api/job/stream")
-def api_job_stream() -> StreamingResponse:
+def api_job_stream(user: str = Depends(get_current_user)) -> StreamingResponse:
     def gen():
         # Subscribe to the OCR broadcaster - each client gets their own queue
         sub_id, client_q = ocr_broadcaster.subscribe()
@@ -1359,7 +1373,7 @@ def api_job_stream() -> StreamingResponse:
 
 
 @app.get("/api/vram")
-def api_vram() -> JSONResponse:
+def api_vram(user: str = Depends(get_current_user)) -> JSONResponse:
     """Get current VRAM usage via nvidia-smi (works without loading torch).
 
     Falls back to cached stats from subprocess if available.
@@ -1387,7 +1401,7 @@ def api_vram() -> JSONResponse:
 
 
 @app.get("/api/config")
-def api_config() -> JSONResponse:
+def api_config(user: str = Depends(get_current_user)) -> JSONResponse:
     """Return current fixed batch configuration (no presets)."""
     return JSONResponse(
         {
@@ -1495,7 +1509,7 @@ def api_export(
 
 
 @app.post("/api/postprocess/fix-mojibake")
-def api_fix_mojibake(payload: MojibakeFixRequest) -> JSONResponse:
+def api_fix_mojibake(payload: MojibakeFixRequest, user: str = Depends(get_current_user)) -> JSONResponse:
     """Fix mojibake in markdown files (encoding errors).
 
     Note: This functionality is now built into the converter.
@@ -1510,7 +1524,7 @@ def api_fix_mojibake(payload: MojibakeFixRequest) -> JSONResponse:
 
 
 @app.get("/api/postprocess/llm-status")
-def api_llm_status() -> JSONResponse:
+def api_llm_status(user: str = Depends(get_current_user)) -> JSONResponse:
     """Check if LM Studio is running and accessible."""
     try:
         req = urllib.request.Request(
@@ -1534,7 +1548,7 @@ def api_llm_status() -> JSONResponse:
 
 
 @app.get("/api/llm/job/status")
-def api_llm_job_status() -> JSONResponse:
+def api_llm_job_status(user: str = Depends(get_current_user)) -> JSONResponse:
     """Get current LLM polish job status."""
     with llm_job_lock:
         if current_llm_job is None:
@@ -1625,7 +1639,7 @@ def api_llm_job_start(
 
 
 @app.post("/api/llm/job/stop")
-def api_llm_job_stop() -> JSONResponse:
+def api_llm_job_stop(user: str = Depends(get_current_user)) -> JSONResponse:
     """Stop the current LLM polish job."""
     with llm_job_lock:
         global current_llm_job
@@ -1647,7 +1661,7 @@ def api_llm_job_stop() -> JSONResponse:
 
 
 @app.get("/api/llm/job/stream")
-def api_llm_job_stream() -> StreamingResponse:
+def api_llm_job_stream(user: str = Depends(get_current_user)) -> StreamingResponse:
     """SSE stream for LLM polish job progress."""
 
     def gen():
@@ -1679,7 +1693,7 @@ def api_llm_job_stream() -> StreamingResponse:
 
 # Keep old endpoint for backwards compatibility but use new module invocation
 @app.post("/api/postprocess/polish-llm")
-def api_polish_llm(payload: LegacyPolishRequest) -> JSONResponse:
+def api_polish_llm(payload: LegacyPolishRequest, user: str = Depends(get_current_user)) -> JSONResponse:
     """Run polish on specified file (legacy endpoint)."""
     file_path = payload.file
     dry_run = payload.dry_run
