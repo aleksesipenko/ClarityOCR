@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from clarityocr.db import Artifact, JobFile, get_session
+from clarityocr.job_manager import record_artifact
 from clarityocr.server import app
 
 
@@ -74,3 +75,47 @@ def test_upload_submit_and_artifact_download(client):
     download_resp = client.get(f"/api/v2/artifacts/{artifact_id}/download")
     assert download_resp.status_code == 200
     assert download_resp.content == b"artifact-body"
+
+
+def test_record_artifact_is_idempotent(client):
+    files = [("files", ("sample.pdf", b"%PDF-1.4\n%test\n", "application/pdf"))]
+    upload_resp = client.post("/api/v2/uploads", files=files)
+    assert upload_resp.status_code == 201
+    upload_data = upload_resp.json()
+
+    start_payload = {
+        "api_version": "v2",
+        "meta_schema_version": "1.0",
+        "client_id": "pytest_upload_client",
+        "client_request_id": str(uuid.uuid4()),
+        "inputs": upload_data["inputs"],
+        "mode": "ocr_only",
+        "preset": "balanced",
+        "naming_policy": "on",
+        "polish": "off",
+    }
+    start_resp = client.post("/api/v2/jobs", json=start_payload)
+    assert start_resp.status_code == 202
+    job_id = start_resp.json()["job_id"]
+
+    artifact_path = Path(upload_data["inputs"][0]).with_suffix(".artifact-idempotent.txt")
+    artifact_path.write_text("artifact-body", encoding="utf-8")
+
+    with get_session() as session:
+        file_row = session.query(JobFile).filter(JobFile.job_id == job_id).first()
+        assert file_row is not None
+        a1 = record_artifact(session, job_id, file_row.id, "md", str(artifact_path), sha256="abc")
+        a2 = record_artifact(session, job_id, file_row.id, "md", str(artifact_path), sha256="abc")
+        assert a1.id == a2.id
+
+        total = (
+            session.query(Artifact)
+            .filter(
+                Artifact.job_id == job_id,
+                Artifact.file_id == file_row.id,
+                Artifact.type == "md",
+                Artifact.path == str(artifact_path),
+            )
+            .count()
+        )
+        assert total == 1

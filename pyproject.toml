@@ -41,7 +41,9 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "marker-pdf>=0.3.0",
-    "torch>=2.0.0",
+    "torch>=2.7,<2.8",
+    "torchvision>=0.22,<0.23",
+    "transformers>=4.45.2,<4.56.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
     "python-multipart>=0.0.9",

@@ -5,8 +5,12 @@
 marker-pdf>=0.3.0
 
 # PyTorch runtime (CUDA on NVIDIA + CPU fallback)
-# For CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-torch>=2.0.0
+# Keep torch/torchvision in a compatible pair required by modern marker-pdf.
+torch>=2.7,<2.8
+torchvision>=0.22,<0.23
+
+# Marker/surya are sensitive to transformer API changes; keep a stable band.
+transformers>=4.45.2,<4.56.0
 
 # System memory monitoring (telemetry/helpers)
 psutil>=5.9.0

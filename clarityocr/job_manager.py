@@ -243,6 +243,17 @@ def update_worker_heartbeat(session: Session, worker_id: str, gpu_id: Optional[s
 
 def record_artifact(session: Session, job_id: str, file_id: str, type: str, path: str, sha256: str = None):
     """Save an artifact record to the db."""
+    existing = (
+        session.query(Artifact)
+        .filter_by(job_id=job_id, file_id=file_id, type=type, path=path)
+        .first()
+    )
+    if existing:
+        if sha256 and not existing.sha256:
+            existing.sha256 = sha256
+            session.commit()
+        return existing
+
     artifact = Artifact(
         id=str(uuid.uuid4()),
         job_id=job_id,

@@ -7,6 +7,7 @@ import logging
 import traceback
 import hashlib
 import hmac
+import re
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
@@ -55,12 +56,60 @@ def _write_manifest(manifest_path: str, files: list[dict[str, Any]]) -> None:
         json.dump({"schema_version": "1.0", "files": files}, f, indent=2)
 
 
-def _fallback_markdown_from_pdf(input_pdf: str, md_path: str) -> None:
-    """Generate markdown with lightweight converter when marker pipeline fails."""
+_PAGE_MARKER_RE = re.compile(r"(?m)^\s*\[p:\d+\]\s*$")
+
+
+def _normalize_ocr_text(md_text: str) -> str:
+    cleaned = _PAGE_MARKER_RE.sub("", md_text or "")
+    return cleaned.strip()
+
+
+def _assert_non_empty_ocr_text(md_text: str, md_path: str) -> None:
+    if not _normalize_ocr_text(md_text):
+        raise ValueError(f"OCR output is empty after normalization: {md_path}")
+
+
+def _fallback_markdown_from_input(input_path: str, md_path: str) -> None:
+    """
+    Generate markdown with lightweight fallback converter.
+    For images/zip we first convert to temporary PDF, then parse markdown from PDF.
+    """
     from .simple_converter import convert_to_markdown
+    from .converter import images_to_pdf, process_zip_archive
 
     Path(md_path).parent.mkdir(parents=True, exist_ok=True)
-    convert_to_markdown(input_pdf, md_path)
+    source = Path(input_path)
+    suffix = source.suffix.lower()
+
+    if suffix == ".pdf":
+        convert_to_markdown(str(source), md_path)
+        return
+
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+    temp_root = Path(md_path).parent / ".fallback_tmp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    temp_pdf = temp_root / f"{source.stem}.pdf"
+
+    try:
+        if suffix in image_exts:
+            images_to_pdf([source], temp_pdf)
+        elif suffix == ".zip":
+            temp_pdf = process_zip_archive(source, temp_root / source.stem)
+        else:
+            raise ValueError(f"Unsupported fallback input format: {input_path}")
+        convert_to_markdown(str(temp_pdf), md_path)
+    finally:
+        try:
+            if temp_root.exists():
+                for p in temp_root.rglob("*"):
+                    if p.is_file():
+                        p.unlink(missing_ok=True)
+                for p in sorted(temp_root.rglob("*"), reverse=True):
+                    if p.is_dir():
+                        p.rmdir()
+                temp_root.rmdir()
+        except Exception:
+            pass
 
 
 class LLMCircuitBreaker:
@@ -432,7 +481,7 @@ class PipelineWorker(threading.Thread):
 
                 if result.returncode != 0:
                     logger.warning("Primary converter failed, fallback to simple converter: %s", result.stdout)
-                    _fallback_markdown_from_pdf(input_path, md_path)
+                    _fallback_markdown_from_input(input_path, md_path)
 
                 if not os.path.exists(md_path):
                     discovered = sorted(Path(output_dir).glob("*.md"))
@@ -444,7 +493,7 @@ class PipelineWorker(threading.Thread):
                             "Primary converter produced no markdown. Fallback to simple converter for %s",
                             input_path,
                         )
-                        _fallback_markdown_from_pdf(input_path, md_path)
+                        _fallback_markdown_from_input(input_path, md_path)
                         if os.path.exists(md_path):
                             base_name = Path(md_path).stem
                         else:
@@ -453,6 +502,7 @@ class PipelineWorker(threading.Thread):
                 polish_result = self._try_optional_polish(md_path, mode, config, job_id, file_id)
                 with open(md_path, "r", encoding="utf-8") as md_file:
                     md_text = md_file.read()
+                _assert_non_empty_ocr_text(md_text, md_path)
                 
                 # 2. Extract Metadata & Naming
                 meta = generate_metadata(md_path)
@@ -554,16 +604,17 @@ class PipelineWorker(threading.Thread):
                     md_path = os.path.join(ocr_out_dir, "merged.md")
                     if result.returncode != 0:
                         logger.warning("Primary post-merge converter failed, fallback to simple converter: %s", result.stdout)
-                        _fallback_markdown_from_pdf(out_pdf, md_path)
+                        _fallback_markdown_from_input(out_pdf, md_path)
                     elif not os.path.exists(md_path):
                         logger.warning(
                             "Primary post-merge converter produced no markdown. Fallback to simple converter for %s",
                             out_pdf,
                         )
-                        _fallback_markdown_from_pdf(out_pdf, md_path)
+                        _fallback_markdown_from_input(out_pdf, md_path)
 
                     if os.path.exists(md_path):
                         md_text = open(md_path, 'r', encoding='utf-8').read()
+                        _assert_non_empty_ocr_text(md_text, md_path)
                         meta = generate_metadata(md_path)
                         naming = generate_naming(out_pdf, md_text, output_dir=ocr_out_dir)
                         
@@ -588,6 +639,8 @@ class PipelineWorker(threading.Thread):
                             record_artifact(session, job_id, file_id, "meta", meta_path)
                             record_artifact(session, job_id, file_id, "naming", naming_path)
                             record_artifact(session, job_id, file_id, "manifest", manifest_path)
+                    else:
+                        raise FileNotFoundError(f"Markdown output not found at {md_path}")
 
                 # Mark success
                 duration_ms = int((time.time() - start_time) * 1000)
