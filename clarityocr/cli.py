@@ -74,7 +74,7 @@ def cmd_polish(args):
 
 
 def cmd_serve(args):
-    """Start the Web UI server."""
+    """Start the V2 web server."""
     from .server import run_server
 
     run_server(host=args.host, port=args.port)
@@ -145,7 +145,7 @@ Examples:
     # Serve command
     serve_parser = subparsers.add_parser("serve", help="Start Web UI server")
     serve_parser.add_argument(
-        "--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)"
+        "--host", default="0.0.0.0", help="Host to bind (default: 0.0.0.0)"
     )
     serve_parser.add_argument(
         "--port", "-p", type=int, default=8008, help="Port to listen (default: 8008)"

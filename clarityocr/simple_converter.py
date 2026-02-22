@@ -5,7 +5,7 @@ Simple PDF to Text Converter (Fallback Mode)
 Uses pypdfium2 for reliable PDF text extraction on all platforms.
 Works without marker-pdf dependency.
 
-Performance: Fast, low memory, works reliably on Apple Silicon.
+Performance: Fast and low-memory, useful for local debugging.
 """
 
 import sys
@@ -14,6 +14,27 @@ from typing import Optional
 import warnings
 
 warnings.filterwarnings("ignore")
+
+
+def _open_pdf(pdf_path: str):
+    import pypdfium2
+
+    if hasattr(pypdfium2, "PdfDocument"):
+        return pypdfium2.PdfDocument(pdf_path)
+    if hasattr(pypdfium2, "Pdf"):  # backward compatibility
+        return pypdfium2.Pdf(pdf_path)
+    raise RuntimeError("Unsupported pypdfium2 API: no PdfDocument/Pdf found")
+
+
+def _page_text(page) -> str:
+    text_page = page.get_textpage()
+    if hasattr(text_page, "get_text_range"):
+        text = text_page.get_text_range()
+    elif hasattr(text_page, "get_text"):
+        text = text_page.get_text()
+    else:
+        text = ""
+    return (text or "").strip()
 
 
 def extract_text(pdf_path: str, output_path: Optional[str] = None) -> str:
@@ -39,17 +60,13 @@ def extract_text(pdf_path: str, output_path: Optional[str] = None) -> str:
         out = pdf.with_suffix(".txt")
 
     try:
-        import pypdfium2
-        pdf_doc = pypdfium2.Pdf(pdf_path)
+        pdf_doc = _open_pdf(pdf_path)
         n_pages = len(pdf_doc)
 
         text_parts = []
         for page_index in range(n_pages):
             page = pdf_doc[page_index]
-            text_page = page.get_textpage().get_text().strip()
-            text_parts.append(text_page)
-            # Free memory
-            text_page = None
+            text_parts.append(_page_text(page))
 
         text = "\n\n".join(text_parts)
 
@@ -57,13 +74,13 @@ def extract_text(pdf_path: str, output_path: Optional[str] = None) -> str:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
 
-        print(f"✅ Successfully extracted {n_pages} pages from {pdf.name}")
-        print(f"📝 Output: {out}")
+        print(f"OK: extracted {n_pages} pages from {pdf.name}")
+        print(f"Output: {out}")
 
         return str(out)
 
     except Exception as e:
-        print(f"❌ Error extracting text: {e}")
+        print(f"Error extracting text: {e}")
         raise
 
 
@@ -90,22 +107,18 @@ def convert_to_markdown(pdf_path: str, output_path: Optional[str] = None) -> str
         out = pdf.with_suffix(".md")
 
     try:
-        import pypdfium2
-        pdf_doc = pypdfium2.Pdf(pdf_path)
+        pdf_doc = _open_pdf(pdf_path)
         n_pages = len(pdf_doc)
 
         md_lines = []
         for page_index in range(n_pages):
             page = pdf_doc[page_index]
-            text_page = page.get_textpage().get_text().strip()
+            text_page = _page_text(page)
 
             if text_page:
                 md_lines.append(text_page)
             else:
                 md_lines.append("")  # Empty page
-
-            # Free memory
-            text_page = None
 
         md_text = "\n\n".join(md_lines)
 
@@ -113,13 +126,13 @@ def convert_to_markdown(pdf_path: str, output_path: Optional[str] = None) -> str
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(md_text, encoding="utf-8")
 
-        print(f"✅ Successfully converted {pdf.name} ({n_pages} pages) to Markdown")
-        print(f"📝 Output: {out}")
+        print(f"OK: converted {pdf.name} ({n_pages} pages) to Markdown")
+        print(f"Output: {out}")
 
         return str(out)
 
     except Exception as e:
-        print(f"❌ Error converting to Markdown: {e}")
+        print(f"Error converting to Markdown: {e}")
         raise
 
 

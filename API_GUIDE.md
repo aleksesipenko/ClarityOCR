@@ -1,77 +1,57 @@
-# ClarityOCR API Guide for AI Agents
+# ClarityOCR API Guide (V2 Only)
 
-ClarityOCR is designed to be easily integrated into AI workflows. This guide covers the versioned API endpoints available for agents.
+ClarityOCR exposes a V2 asynchronous API for server-side OCR/merge pipelines.
 
-## Authentication
+If `API_USER` and `API_PASSWORD` are set, all `/api/v2/*` endpoints require HTTP Basic Auth.
 
-If `API_USER` and `API_PASSWORD` environment variables are set, all endpoints require HTTP Basic Authentication.
+## Health
 
-## Endpoints
+- `GET /api/v2/health/live` -> `{"status":"alive"}`
+- `GET /api/v2/health/ready` -> component readiness (`ocr_core`, `db`, `llm`)
 
-### 1. Scan Directory
-`GET /api/scan?dir={path}&max_pages={n}`
+## Upload
 
-Lists all supported files (PDF, ZIP, Images) in a directory.
+- `POST /api/v2/uploads` (`multipart/form-data`, field: `files`)
+- Response includes:
+  - `upload_id`
+  - `inputs` (server-side absolute paths)
+  - uploaded file metadata
 
-### 2. Start OCR Job
-`POST /api/job/start`
+## Job Submission
 
-```json
-{
-  "files": ["/path/to/file1.pdf", "/path/to/archive.zip"],
-  "output_dir": "/path/to/output",
-  "preset": "balanced",
-  "parallel": 2,
-  "auto_fallback": true
-}
-```
-**Presets:** `speed`, `balanced`, `quality`.
+- `POST /api/v2/jobs`
+- Idempotent by (`client_id`, `client_request_id`) + payload hash.
+- Supported `mode` values:
+  - `ocr_only`
+  - `ocr_plus_metadata`
+  - `merge_only`
+  - `merge_then_ocr`
+  - `ocr_plus_polish`
 
-### 3. Job Status
-`GET /api/job/status`
+## Job Tracking
 
-Returns progress of the current OCR job.
+- `GET /api/v2/jobs?limit=20`
+- `GET /api/v2/jobs/{job_id}`
+- `GET /api/v2/jobs/{job_id}/files`
+- `GET /api/v2/jobs/{job_id}/events`
 
-### 4. LLM Polish
-`POST /api/llm/job/start`
+## Artifacts
 
-```json
-{
-  "files": ["/path/to/file.md"],
-  "base_url": "http://localhost:1234/v1"
-}
-```
+- `GET /api/v2/jobs/{job_id}/artifacts`
+- `GET /api/v2/artifacts/{artifact_id}/download`
 
-### 5. Export Document
-`POST /api/v1/export`
+## Control
 
-```json
-{
-  "file": "/path/to/file.md",
-  "format": "docx",
-  "reference_doc": "/path/to/style.docx",
-  "options": {
-    "font-size": "12pt"
-  }
-}
-```
+- `POST /api/v2/jobs/{job_id}/cancel`
+- `POST /api/v2/jobs/{job_id}/retry-failed`
 
-### 6. File Management
-- `GET /api/v1/file/read?path={path}`: Read file content.
-- `POST /api/v1/file/save`: Save file content (`path` and `content` in body).
+## Merge Shortcuts
 
-## Integration Example (Python)
+- `POST /api/v2/merge` (forces `mode=merge_only`)
+- `POST /api/v2/merge-and-ocr` (forces `mode=merge_then_ocr`)
 
-```python
-import requests
+## Security Constraints
 
-API_URL = "http://your-vps:8008"
-AUTH = ("admin", "yourpassword")
-
-# Start a job
-res = requests.post(f"{API_URL}/api/job/start", auth=AUTH, json={
-    "files": ["/app/inputs/doc.pdf"],
-    "preset": "quality"
-})
-print(res.json())
-```
+- Batch size limits
+- URL SSRF protections (private/loopback blocked)
+- ZIP safety checks (depth, entries, ratio, total unpacked size)

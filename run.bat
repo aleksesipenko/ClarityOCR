@@ -1,6 +1,6 @@
 @echo off
-:: ClarityOCR Quick Start
-:: Starts the web server on http://127.0.0.1:8008
+:: ClarityOCR V2 Quick Start
+:: Starts the server-first V2 web console on http://127.0.0.1:8008
 
 echo Starting ClarityOCR...
 
@@ -16,7 +16,7 @@ if exist venv\Scripts\activate.bat (
 
 :: Start server
 echo.
-echo ClarityOCR Web UI starting...
+echo ClarityOCR V2 console starting...
 echo Open your browser to: http://127.0.0.1:8008
 echo.
 echo Press Ctrl+C to stop the server.
