@@ -44,10 +44,10 @@
 
 | # | Deliverable | Est | Status |
 |---|------------|-----|--------|
-| 2.1 | Progress dashboard (live bars, stage timeline) | 3h | todo |
-| 2.2 | Error display with retry button | 2h | todo |
-| 2.3 | Job queue overview page | 2h | todo |
-| 2.4 | Local smoke test | 1h | todo |
+| 2.1 | Progress dashboard (live bars, stage timeline) | 3h | ✅ done (49673d4) |
+| 2.2 | Error display with retry button | 2h | ✅ done (49673d4) |
+| 2.3 | Job queue overview page | 2h | ✅ done (49673d4) |
+| 2.4 | Local smoke test | 1h | ✅ imports ok, routes verified |
 
 **Checkpoint:** web UI shows live progress, error cards, queue overview.
 
