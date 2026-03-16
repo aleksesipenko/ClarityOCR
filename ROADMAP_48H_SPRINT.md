@@ -58,13 +58,13 @@
 
 | # | Deliverable | Est | Status |
 |---|------------|-----|--------|
-| 3.1 | Qwen 3.5 eval script + test data | 2h | todo |
-| 3.2 | A/B canary routing | 1h | todo |
-| 3.3 | vLLM config + docker-compose update | 1h | todo |
-| 5.1 | Canon check script | 1h | todo |
-| 5.2 | Docker versioning | 1h | todo |
-| 5.3 | Rollback runbook | 1h | todo |
-| 5.4 | CI smoke test | 1h | todo |
+| 3.1 | Qwen 3.5 eval script + test data | 2h | ✅ done (816be00) |
+| 3.2 | A/B canary routing | 1h | ✅ done (816be00) |
+| 3.3 | vLLM config + docker-compose update | 1h | ✅ done (816be00) |
+| 5.1 | Canon check script | 1h | ✅ done (816be00) |
+| 5.2 | Docker versioning | 1h | ✅ done (816be00) |
+| 5.3 | Rollback runbook | 1h | ✅ done (816be00) |
+| 5.4 | CI smoke test | 1h | ✅ 42/42 passed (816be00) |
 
 **Checkpoint:** canary routing works, version tagging works, canon check green.
 
@@ -75,11 +75,11 @@
 
 | # | Deliverable | Est | Status |
 |---|------------|-----|--------|
-| I.1 | Alfred VPS workspace: update ClarityOCR integration refs | 2h | todo |
-| I.2 | Alfred template: update OCR pipeline config for new API | 2h | todo |
-| I.3 | Our contour: update canon docs, STATE.json, build queue | 1h | todo |
-| I.4 | Deploy to Alex-PC Docker (build, push, restart) | 2h | todo |
-| I.5 | Integration smoke | 1h | todo |
+| I.1 | Alfred VPS workspace: update ClarityOCR integration refs | 2h | ✅ done (endpoint+job body updated) |
+| I.2 | Alfred template: update OCR pipeline config for new API | 2h | ✅ done (Tailscale IP, full v2 contract) |
+| I.3 | Our contour: update canon docs, STATE.json, build queue | 1h | ✅ done (CANON+STATE updated) |
+| I.4 | Deploy to Alex-PC Docker (build, push, restart) | 2h | ⏳ pending Alex-PC access |
+| I.5 | Integration smoke | 1h | ⏳ pending deploy |
 
 **Checkpoint:** Alfred can hit new ClarityOCR API, our docs reflect reality.
 
