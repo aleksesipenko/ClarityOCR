@@ -28,6 +28,9 @@ from .converter import main as run_converter # We will call converter as a pytho
 from .naming import generate_naming # to be implemented
 from .metadata import generate_metadata # to be implemented
 from .structured_logger import get_logger
+from .errors import ErrorCode, PipelineError, RETRY_POLICY
+from .quality_gates import check_ocr_quality, check_polish_quality
+from .resource_limits import ResourceLimits, ResourceLimitError, check_file_limits
 
 logger = logging.getLogger("pipeline_v2")
 struct_log = get_logger("pipeline_v2")
@@ -37,6 +40,7 @@ struct_log = get_logger("pipeline_v2")
 # =============================================================================
 
 from contextlib import contextmanager
+import signal
 
 @contextmanager
 def _stage_context(file_id: str, job_id: str, stage: str, pages_total: Optional[int] = None):
@@ -62,6 +66,31 @@ def _stage_context(file_id: str, job_id: str, stage: str, pages_total: Optional[
                 file_id=file_id,
                 payload={"duration_ms": duration_ms}
             )
+
+
+@contextmanager
+def _timeout_context(timeout_sec: int):
+    """
+    Context manager for enforcing processing time limits.
+    Raises TimeoutError if processing exceeds timeout.
+    Note: Only works on Unix-like systems (signal.SIGALRM).
+    """
+    def timeout_handler(signum, frame):
+        raise TimeoutError(f"Processing exceeded time limit of {timeout_sec}s")
+
+    # Set up timeout only on Unix systems
+    if hasattr(signal, 'SIGALRM'):
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout_sec)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    else:
+        # On Windows, signal.SIGALRM is not available - skip timeout
+        # TODO: Implement Windows-compatible timeout using threading.Timer
+        yield
 
 # Constants from Implementation Plan v2.2.1
 HEARTBEAT_INTERVAL_SEC = 5
@@ -100,7 +129,10 @@ def _normalize_ocr_text(md_text: str) -> str:
 
 def _assert_non_empty_ocr_text(md_text: str, md_path: str) -> None:
     if not _normalize_ocr_text(md_text):
-        raise ValueError(f"OCR output is empty after normalization: {md_path}")
+        raise PipelineError(
+            ErrorCode.E_EMPTY_OCR_OUTPUT,
+            f"OCR output is empty after normalization: {md_path}"
+        )
 
 
 def _fallback_markdown_from_input(input_path: str, md_path: str) -> None:
@@ -468,7 +500,192 @@ class PipelineWorker(threading.Thread):
         start_time = time.time()
         logger.info(f"Worker {self.worker_id} processing file {file_id}: {input_path}")
         struct_log.info("File processing started", job_id=job_id, file_id=file_id, worker_id=self.worker_id, input_path=input_path)
-        
+
+        try:
+            # 0. Check resource limits before processing
+            limits = ResourceLimits()
+            try:
+                check_file_limits(input_path, limits)
+            except ResourceLimitError as e:
+                raise PipelineError(ErrorCode.E_RESOURCE_LIMIT, str(e))
+
+            # Apply processing timeout
+            with _timeout_context(limits.max_processing_time_sec):
+                self._process_file_inner(file_id, job_id, input_path, start_time, limits)
+
+        except TimeoutError as e:
+            logger.error(f"Timeout processing file {file_id}: {e}")
+            duration_ms = int((time.time() - start_time) * 1000)
+            raise PipelineError(ErrorCode.E_RESOURCE_LIMIT, f"Processing timeout after {limits.max_processing_time_sec}s")
+
+        except PipelineError as e:
+            # Structured error with error code
+            logger.error(f"Pipeline error processing file {file_id}: {e}")
+            duration_ms = int((time.time() - start_time) * 1000)
+            struct_log.error(
+                "File processing failed",
+                job_id=job_id,
+                file_id=file_id,
+                duration_ms=duration_ms,
+                error_code=e.error_code.value,
+                error=e.message
+            )
+
+            retry_policy = e.get_retry_policy()
+
+            with get_session() as session:
+                f_db = session.query(JobFile).filter_by(id=file_id).first()
+                if not f_db:
+                    append_event(
+                        session,
+                        job_id,
+                        "file_failed_final",
+                        file_id=file_id,
+                        payload={"error": e.message, "error_code": e.error_code.value}
+                    )
+                    self._post_file_finalize(job_id)
+                    return
+
+                next_attempt = int(f_db.attempt or 0) + 1
+                max_attempts = retry_policy["max_attempts"]
+
+                if next_attempt < max_attempts:
+                    # Requeue for retry with backoff
+                    transition_file_status(
+                        session,
+                        file_id,
+                        "queued",
+                        attempt=next_attempt,
+                        last_error_message=e.message,
+                        last_error_code=e.error_code.value,
+                        duration_ms=duration_ms,
+                        max_attempts=max_attempts,
+                    )
+                    append_event(
+                        session,
+                        job_id,
+                        "file_requeued",
+                        file_id=file_id,
+                        payload={
+                            "error": e.message,
+                            "error_code": e.error_code.value,
+                            "attempt": next_attempt,
+                            "backoff_sec": retry_policy["backoff_sec"]
+                        },
+                    )
+
+                    # Apply backoff delay
+                    backoff_sec = retry_policy.get("backoff_sec", 0)
+                    if backoff_sec > 0:
+                        time.sleep(backoff_sec)
+                else:
+                    transition_file_status(
+                        session,
+                        file_id,
+                        "failed_final",
+                        attempt=next_attempt,
+                        last_error_message=e.message,
+                        last_error_code=e.error_code.value,
+                        duration_ms=duration_ms,
+                    )
+                    append_event(
+                        session,
+                        job_id,
+                        "file_failed_final",
+                        file_id=file_id,
+                        payload={
+                            "error": e.message,
+                            "error_code": e.error_code.value,
+                            "attempt": next_attempt
+                        },
+                    )
+            self._post_file_finalize(job_id)
+
+        except Exception as e:
+            # Unstructured error - map to E_INTERNAL
+            logger.error(f"Error processing file {file_id}: {traceback.format_exc()}")
+            duration_ms = int((time.time() - start_time) * 1000)
+            struct_log.error(
+                "File processing failed",
+                job_id=job_id,
+                file_id=file_id,
+                duration_ms=duration_ms,
+                error_code="E_INTERNAL",
+                error=str(e)
+            )
+
+            retry_policy = RETRY_POLICY[ErrorCode.E_INTERNAL]
+
+            with get_session() as session:
+                f_db = session.query(JobFile).filter_by(id=file_id).first()
+                if not f_db:
+                    append_event(
+                        session,
+                        job_id,
+                        "file_failed_final",
+                        file_id=file_id,
+                        payload={"error": str(e), "error_code": "E_INTERNAL"}
+                    )
+                    self._post_file_finalize(job_id)
+                    return
+
+                next_attempt = int(f_db.attempt or 0) + 1
+                max_attempts = retry_policy["max_attempts"]
+
+                if next_attempt < max_attempts:
+                    # Requeue for retry
+                    transition_file_status(
+                        session,
+                        file_id,
+                        "queued",
+                        attempt=next_attempt,
+                        last_error_message=str(e),
+                        last_error_code="E_INTERNAL",
+                        duration_ms=duration_ms,
+                        max_attempts=max_attempts,
+                    )
+                    append_event(
+                        session,
+                        job_id,
+                        "file_requeued",
+                        file_id=file_id,
+                        payload={
+                            "error": str(e),
+                            "error_code": "E_INTERNAL",
+                            "attempt": next_attempt,
+                            "backoff_sec": retry_policy["backoff_sec"]
+                        },
+                    )
+
+                    # Apply backoff delay
+                    backoff_sec = retry_policy.get("backoff_sec", 0)
+                    if backoff_sec > 0:
+                        time.sleep(backoff_sec)
+                else:
+                    transition_file_status(
+                        session,
+                        file_id,
+                        "failed_final",
+                        attempt=next_attempt,
+                        last_error_message=str(e),
+                        last_error_code="E_INTERNAL",
+                        duration_ms=duration_ms,
+                    )
+                    append_event(
+                        session,
+                        job_id,
+                        "file_failed_final",
+                        file_id=file_id,
+                        payload={
+                            "error": str(e),
+                            "error_code": "E_INTERNAL",
+                            "attempt": next_attempt
+                        },
+                    )
+            self._post_file_finalize(job_id)
+
+    def _process_file_inner(self, file_id: str, job_id: str, input_path: str, start_time: float, limits: ResourceLimits):
+        """Inner processing logic (wrapped with timeout)."""
         try:
             # 1. Fetch Job context to know mode and config
             with get_session() as session:
@@ -509,15 +726,27 @@ class PipelineWorker(threading.Thread):
                     env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
 
                     project_root = str(Path(__file__).resolve().parent.parent)
-                    result = subprocess.run(
-                        cmd,
-                        cwd=project_root,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        timeout=600,
-                        env=env,
-                    )
+
+                    try:
+                        result = subprocess.run(
+                            cmd,
+                            cwd=project_root,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            timeout=600,
+                            env=env,
+                        )
+                    except subprocess.TimeoutExpired:
+                        raise PipelineError(
+                            ErrorCode.E_NETWORK_TIMEOUT,
+                            f"OCR converter timed out after 600s for {input_path}"
+                        )
+                    except FileNotFoundError:
+                        raise PipelineError(
+                            ErrorCode.E_INVALID_PDF,
+                            f"Input file not found or inaccessible: {input_path}"
+                        )
 
                     # Prefer deterministic expected path, then fall back to discovered markdown.
                     base_name = Path(input_path).stem
@@ -543,12 +772,104 @@ class PipelineWorker(threading.Thread):
                             else:
                                 raise FileNotFoundError(f"Markdown output not found at {md_path}")
 
-                # Polish stage (outside OCR context)
-                with _stage_context(file_id, job_id, "polish"):
-                    polish_result = self._try_optional_polish(md_path, mode, config, job_id, file_id)
+                # Read OCR output
                 with open(md_path, "r", encoding="utf-8") as md_file:
                     md_text = md_file.read()
                 _assert_non_empty_ocr_text(md_text, md_path)
+
+                # Quality gate: OCR confidence check
+                ocr_passed, ocr_warning, ocr_metadata = check_ocr_quality(md_text)
+                if ocr_warning:
+                    with get_session() as session:
+                        append_event(
+                            session,
+                            job_id,
+                            "quality_warning_ocr" if ocr_passed else "quality_failure_ocr",
+                            file_id=file_id,
+                            payload={"message": ocr_warning, "metadata": ocr_metadata}
+                        )
+                    if not ocr_passed:
+                        raise PipelineError(
+                            ErrorCode.E_LOW_OCR_CONFIDENCE,
+                            ocr_warning
+                        )
+
+                # Polish stage (outside OCR context) - graceful degradation enabled
+                original_md_text = md_text
+                polish_degraded = False
+                degradation_reason = None
+
+                try:
+                    with _stage_context(file_id, job_id, "polish"):
+                        polish_result = self._try_optional_polish(md_path, mode, config, job_id, file_id)
+
+                    # Check if polish was skipped due to circuit breaker
+                    if not polish_result.get("polish_applied"):
+                        fallback_reason = polish_result.get("fallback_reason", "")
+                        if fallback_reason in ["circuit_open", "timeout", "llm_error"]:
+                            polish_degraded = True
+                            degradation_reason = f"polish_skipped_{fallback_reason}"
+                            with get_session() as session:
+                                append_event(
+                                    session,
+                                    job_id,
+                                    "polish_degraded",
+                                    file_id=file_id,
+                                    payload={"reason": degradation_reason}
+                                )
+
+                    # Re-read after polish (polish modifies the file in place if successful)
+                    with open(md_path, "r", encoding="utf-8") as md_file:
+                        md_text = md_file.read()
+
+                    # Quality gate: Polish hallucination check (if polish was applied)
+                    if polish_result.get("polish_applied"):
+                        polish_passed, polish_warning, polish_metadata = check_polish_quality(
+                            original_md_text, md_text
+                        )
+                        if polish_warning:
+                            with get_session() as session:
+                                append_event(
+                                    session,
+                                    job_id,
+                                    "quality_warning_polish" if polish_passed else "quality_failure_polish",
+                                    file_id=file_id,
+                                    payload={"message": polish_warning, "metadata": polish_metadata}
+                                )
+                            if not polish_passed:
+                                # Graceful degradation: revert to original OCR output
+                                polish_degraded = True
+                                degradation_reason = "polish_hallucination_detected"
+                                with get_session() as session:
+                                    append_event(
+                                        session,
+                                        job_id,
+                                        "polish_degraded_hallucination",
+                                        file_id=file_id,
+                                        payload={"reason": degradation_reason}
+                                    )
+                                # Restore original content
+                                with open(md_path, "w", encoding="utf-8") as md_file:
+                                    md_file.write(original_md_text)
+                                md_text = original_md_text
+
+                except PipelineError as e:
+                    # Graceful degradation: continue with raw OCR if polish fails
+                    if e.error_code == ErrorCode.E_POLISH_HALLUCINATION:
+                        polish_degraded = True
+                        degradation_reason = "polish_hallucination"
+                        with get_session() as session:
+                            append_event(
+                                session,
+                                job_id,
+                                "polish_degraded_error",
+                                file_id=file_id,
+                                payload={"error": e.message, "reason": degradation_reason}
+                            )
+                        # Keep original OCR text
+                        md_text = original_md_text
+                    else:
+                        raise  # Re-raise other pipeline errors
                 
                 # 2. Extract Metadata & Naming
                 meta = generate_metadata(md_path)
@@ -580,7 +901,11 @@ class PipelineWorker(threading.Thread):
                 )
                 
                 with get_session() as session:
-                    record_artifact(session, job_id, file_id, "md", md_path)
+                    record_artifact(
+                        session, job_id, file_id, "md", md_path,
+                        degraded=polish_degraded,
+                        degradation_reason=degradation_reason
+                    )
                     record_artifact(session, job_id, file_id, "meta", meta_path)
                     record_artifact(session, job_id, file_id, "naming", naming_path)
                     record_artifact(session, job_id, file_id, "manifest", manifest_path)
@@ -700,53 +1025,8 @@ class PipelineWorker(threading.Thread):
                 self._post_file_finalize(job_id)
 
         except Exception as e:
-            logger.error(f"Error processing file {file_id}: {traceback.format_exc()}")
-            duration_ms = int((time.time() - start_time) * 1000)
-            struct_log.error("File processing failed", job_id=job_id, file_id=file_id, duration_ms=duration_ms, error=str(e))
-            with get_session() as session:
-                f_db = session.query(JobFile).filter_by(id=file_id).first()
-                if not f_db:
-                    append_event(session, job_id, "file_failed_final", file_id=file_id, payload={"error": str(e)})
-                    self._post_file_finalize(job_id)
-                    return
-
-                next_attempt = int(f_db.attempt or 0) + 1
-                if next_attempt < int(f_db.max_attempts or 1):
-                    # Requeue for retry and keep job progressing.
-                    transition_file_status(
-                        session,
-                        file_id,
-                        "queued",
-                        attempt=next_attempt,
-                        last_error_message=str(e),
-                        last_error_code="E_INTERNAL",
-                        duration_ms=duration_ms,
-                    )
-                    append_event(
-                        session,
-                        job_id,
-                        "file_requeued",
-                        file_id=file_id,
-                        payload={"error": str(e), "attempt": next_attempt},
-                    )
-                else:
-                    transition_file_status(
-                        session,
-                        file_id,
-                        "failed_final",
-                        attempt=next_attempt,
-                        last_error_message=str(e),
-                        last_error_code="E_INTERNAL",
-                        duration_ms=duration_ms,
-                    )
-                    append_event(
-                        session,
-                        job_id,
-                        "file_failed_final",
-                        file_id=file_id,
-                        payload={"error": str(e), "attempt": next_attempt},
-                    )
-            self._post_file_finalize(job_id)
+            # Let exceptions bubble up to outer handler in _process_file
+            raise
 
 
 # =============================================================================
