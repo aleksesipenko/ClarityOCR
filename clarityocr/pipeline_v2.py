@@ -41,6 +41,7 @@ struct_log = get_logger("pipeline_v2")
 
 from contextlib import contextmanager
 import signal
+import threading
 
 @contextmanager
 def _stage_context(file_id: str, job_id: str, stage: str, pages_total: Optional[int] = None):
@@ -78,8 +79,9 @@ def _timeout_context(timeout_sec: int):
     def timeout_handler(signum, frame):
         raise TimeoutError(f"Processing exceeded time limit of {timeout_sec}s")
 
-    # Set up timeout only on Unix systems
-    if hasattr(signal, 'SIGALRM'):
+    # Set up timeout only on Unix systems AND only from the main thread
+    # (signal.signal() raises ValueError if called from a worker thread)
+    if hasattr(signal, 'SIGALRM') and threading.current_thread() is threading.main_thread():
         old_handler = signal.signal(signal.SIGALRM, timeout_handler)
         signal.alarm(timeout_sec)
         try:
@@ -88,8 +90,8 @@ def _timeout_context(timeout_sec: int):
             signal.alarm(0)
             signal.signal(signal.SIGALRM, old_handler)
     else:
-        # On Windows, signal.SIGALRM is not available - skip timeout
-        # TODO: Implement Windows-compatible timeout using threading.Timer
+        # Worker thread or Windows: skip SIGALRM-based timeout.
+        # TODO: Implement thread-safe timeout using threading.Timer if needed.
         yield
 
 # Constants from Implementation Plan v2.2.1
