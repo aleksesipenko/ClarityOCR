@@ -73,7 +73,7 @@ class Artifact(Base):
     id = Column(String, primary_key=True)
     job_id = Column(String, ForeignKey('jobs.job_id'), nullable=True, index=True)
     file_id = Column(String, ForeignKey('job_files.id'), nullable=True, index=True)
-    type = Column(String, nullable=False) # md, meta, naming, pdf, report, raw.md
+    type = Column(String, nullable=False) # md, meta, naming, manifest, merge_report, merged_pdf, raw.md — see API_GUIDE.md "Output Formats"
     path = Column(String, nullable=False)
     sha256 = Column(String, nullable=True)
 
