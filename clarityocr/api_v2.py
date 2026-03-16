@@ -453,6 +453,17 @@ def get_job_events(job_id: str, limit: int = 200, skip: int = 0):
         }
 
 
+@router.get("/version", summary="Version Info")
+def version_info():
+    """Return build version, canary routing status."""
+    from .version import __version__
+    from .canary import canary_status
+    return {
+        "version": __version__,
+        "canary": canary_status(),
+    }
+
+
 @router.get("/health/live", summary="Liveness Check")
 def liveness():
     return {"status": "alive"}

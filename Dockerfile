@@ -1,5 +1,13 @@
 # Use NVIDIA CUDA base image with PyTorch
+# Build with version tag:
+#   docker build --build-arg VERSION=$(git rev-parse --short HEAD) \
+#     -t clarityocr:$(git rev-parse --short HEAD) \
+#     -t clarityocr:latest .
 FROM pytorch/pytorch:2.2.1-cuda12.1-cudnn8-runtime
+
+# Version build arg (Phase 5.2)
+ARG VERSION=dev
+ENV CLARITYOCR_VERSION=${VERSION}
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
