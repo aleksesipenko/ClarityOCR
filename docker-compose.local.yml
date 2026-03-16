@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  clarityocr:
+    build:
+      context: .
+      dockerfile: Dockerfile.universal
+    image: clarityocr:local
+    container_name: clarityocr
+    ports:
+      - "8008:8008"
+    volumes:
+      # Mount inputs/outputs to host for easy access
+      - ./inputs:/app/inputs
+      - ./output:/app/output
+      # Persistent cache for models
+      - clarityocr_models:/root/.cache/huggingface
+      # Persistent logs
+      - clarityocr_logs:/root/.clarityocr/logs
+    restart: unless-stopped
+
+volumes:
+  clarityocr_models:
+    name: clarityocr_models_local
+  clarityocr_logs:
+    name: clarityocr_logs_local

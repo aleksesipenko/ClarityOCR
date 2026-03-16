@@ -1,4 +1,5 @@
 const FINAL_STATUSES = new Set(["completed", "partial", "failed", "canceled"]);
+const ACTIVE_STATUSES = new Set(["running", "queued", "accepted"]);
 
 const state = {
   apiBase: "",
@@ -8,6 +9,8 @@ const state = {
   currentJobId: null,
   currentJobStatus: null,
   pollTimer: null,
+  queueTimer: null,
+  allJobs: [],
 };
 
 function el(id) {
@@ -99,19 +102,149 @@ function renderSelectedFiles(files) {
   }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// 2.3: Queue Overview
+// ──────────────────────────────────────────────────────────────────────────────
+
+function renderQueueOverview(jobs) {
+  state.allJobs = jobs || [];
+
+  const counts = { running: 0, queued: 0, accepted: 0, completed: 0, failed: 0, partial: 0, canceled: 0 };
+  for (const job of jobs) {
+    const s = job.status || "unknown";
+    if (counts[s] !== undefined) counts[s]++;
+    else counts[s] = 1;
+  }
+
+  const runningTotal = (counts.running || 0) + (counts.accepted || 0);
+  const failedTotal = (counts.failed || 0) + (counts.partial || 0);
+
+  el("statRunning").textContent = `running: ${runningTotal}`;
+  el("statRunning").className = `queue-stat${runningTotal > 0 ? " active" : ""}`;
+  el("statQueued").textContent = `queued: ${counts.queued || 0}`;
+  el("statQueued").className = `queue-stat${counts.queued > 0 ? " pending" : ""}`;
+  el("statCompleted").textContent = `completed: ${counts.completed || 0}`;
+  el("statCompleted").className = `queue-stat${counts.completed > 0 ? " ok" : ""}`;
+  el("statFailed").textContent = `failed: ${failedTotal}`;
+  el("statFailed").className = `queue-stat${failedTotal > 0 ? " err" : ""}`;
+  el("statCanceled").textContent = `canceled: ${counts.canceled || 0}`;
+  el("statCanceled").className = "queue-stat";
+
+  el("queueLastUpdated").textContent = `updated ${new Date().toLocaleTimeString()}`;
+
+  const container = el("activeJobsList");
+  const activeJobs = jobs.filter((j) => ACTIVE_STATUSES.has(j.status));
+  if (!activeJobs.length) {
+    container.innerHTML = '<div class="no-active-jobs">No active jobs</div>';
+    return;
+  }
+
+  container.innerHTML = activeJobs
+    .map((job) => {
+      const progPct = job.overall_progress_pct ?? 0;
+      return `
+      <div class="active-job-row">
+        <button class="btn ghost btn-monitor btn-monitor-queue" data-job-id="${job.job_id}">
+          <span class="mono">${job.job_id.slice(0, 8)}…</span>
+        </button>
+        <span class="${statusClass(job.status)}">${job.status}</span>
+        <span class="active-job-mode">${job.mode || ""}</span>
+        <div class="progress-bar-track mini">
+          <div class="progress-bar-fill" style="width:${progPct}%"></div>
+        </div>
+        <span class="active-job-pct">${progPct}%</span>
+      </div>`;
+    })
+    .join("");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 2.1: Progress Dashboard + Stage Timeline
+// ──────────────────────────────────────────────────────────────────────────────
+
+function updateProgressDashboard(job, files) {
+  const section = el("progressSection");
+  if (!job) {
+    section.style.display = "none";
+    return;
+  }
+  section.style.display = "";
+
+  const pct = job.overall_progress_pct ?? 0;
+  el("progressBarFill").style.width = `${pct}%`;
+  el("progressLabel").textContent = `${pct}%`;
+  el("progressJobId").textContent = job.job_id;
+  el("progressFilesLabel").textContent = `${job.files_done ?? 0} / ${job.files_total ?? 0} files`;
+
+  // ETA
+  if (job.eta_seconds != null && job.eta_seconds > 0) {
+    const mins = Math.floor(job.eta_seconds / 60);
+    const secs = job.eta_seconds % 60;
+    el("progressEta").textContent = `ETA: ${mins > 0 ? mins + "m " : ""}${secs}s`;
+  } else if (FINAL_STATUSES.has(job.status)) {
+    el("progressEta").textContent = `✓ ${job.status}`;
+  } else {
+    el("progressEta").textContent = "";
+  }
+
+  // Stage timeline
+  const timeline = el("stageTimeline");
+  if (!files || !files.length) {
+    timeline.innerHTML = "";
+    return;
+  }
+
+  timeline.innerHTML = files
+    .map((f) => {
+      const stage = f.stage || "–";
+      const stagePct = f.stage_progress_pct ?? 0;
+      const pagesLabel =
+        f.pages_total > 0
+          ? `${f.pages_done ?? 0}/${f.pages_total} pages`
+          : "";
+      const isError =
+        f.status === "failed_recoverable" ||
+        f.status === "failed_final";
+
+      return `
+      <div class="stage-row${isError ? " stage-row-error" : ""}">
+        <div class="stage-file-name" title="${f.input_path || ""}">${shortPath(f.input_path)}</div>
+        <div class="stage-badge-wrap">
+          <span class="stage-badge stage-${(stage || "").replace(/[^a-z0-9]/g, "-")}">${stage}</span>
+          ${pagesLabel ? `<span class="stage-pages">${pagesLabel}</span>` : ""}
+        </div>
+        <div class="stage-progress-track">
+          <div class="stage-progress-fill" style="width:${stagePct}%"></div>
+        </div>
+        <span class="${statusClass(f.status)}">${f.status}</span>
+      </div>`;
+    })
+    .join("");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 2.2: Enhanced files table with error display + retry per file
+// ──────────────────────────────────────────────────────────────────────────────
+
 function renderJobsTable(jobs) {
   const tbody = el("jobsTbody");
   tbody.innerHTML = "";
   if (!jobs.length) {
-    tbody.innerHTML = '<tr><td colspan="4">No jobs yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5">No jobs yet</td></tr>';
     return;
   }
   for (const job of jobs) {
+    const pct = job.overall_progress_pct;
+    const progressCell = (pct != null)
+      ? `<div class="progress-bar-track mini"><div class="progress-bar-fill" style="width:${pct}%"></div></div> <span class="mono" style="font-size:0.75rem">${pct}%</span>`
+      : `–`;
+
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td class="mono">${job.job_id}</td>
       <td><span class="${statusClass(job.status)}">${job.status}</span></td>
       <td>${job.mode}</td>
+      <td>${progressCell}</td>
       <td><button class="btn ghost btn-monitor" data-job-id="${job.job_id}">Monitor</button></td>
     `;
     tbody.appendChild(tr);
@@ -122,7 +255,7 @@ function renderFilesTable(files) {
   const tbody = el("filesTbody");
   tbody.innerHTML = "";
   if (!files.length) {
-    tbody.innerHTML = '<tr><td colspan="4">No files tracked yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6">No files tracked yet</td></tr>';
     el("filesSummary").textContent = "-";
     return;
   }
@@ -130,12 +263,36 @@ function renderFilesTable(files) {
   const counts = {};
   for (const file of files) {
     counts[file.status] = (counts[file.status] || 0) + 1;
+
+    const isError =
+      file.status === "failed_recoverable" ||
+      file.status === "failed_final";
+    const stage = file.stage || "–";
+    const stagePct = file.stage_progress_pct ?? 0;
+
+    const errorCell = isError && file.error
+      ? `<span class="file-error-msg" title="${file.error}">${String(file.error).slice(0, 60)}${file.error.length > 60 ? "…" : ""}</span>`
+      : (file.error ? `<span class="mono" style="font-size:0.75rem" title="${file.error}">${String(file.error).slice(0, 40)}${file.error.length > 40 ? "…" : ""}</span>` : "–");
+
+    const stageCell = `
+      <span class="stage-badge stage-${(stage).replace(/[^a-z0-9]/g, "-")}">${stage}</span>
+      ${stagePct > 0 ? `<div class="stage-progress-track mini"><div class="stage-progress-fill" style="width:${stagePct}%"></div></div>` : ""}`;
+
+    // Per-file retry: only show if has failures and has retries remaining
+    const canRetry = isError && file.attempt < file.max_attempts;
+    const retryBtn = canRetry
+      ? `<button class="btn danger btn-retry-file" data-job-id="${state.currentJobId}" style="padding:4px 8px; font-size:0.75rem">Retry</button>`
+      : "";
+
     const tr = document.createElement("tr");
+    if (isError) tr.classList.add("file-row-error");
     tr.innerHTML = `
       <td title="${file.input_path}">${shortPath(file.input_path)}</td>
+      <td>${stageCell}</td>
       <td><span class="${statusClass(file.status)}">${file.status}</span></td>
       <td>${file.attempt}/${file.max_attempts}</td>
-      <td>${file.error || "-"}</td>
+      <td>${errorCell}</td>
+      <td>${retryBtn}</td>
     `;
     tbody.appendChild(tr);
   }
@@ -197,8 +354,11 @@ async function refreshJobs() {
   try {
     const data = await apiFetch("/api/v2/jobs?limit=20");
     renderJobsTable(data.jobs || []);
+    // Also refresh queue overview with same data
+    renderQueueOverview(data.jobs || []);
   } catch (err) {
     renderJobsTable([]);
+    renderQueueOverview([]);
     setJobBadge(`jobs fetch failed: ${err.message}`);
   }
 }
@@ -212,9 +372,12 @@ function updateJobControls(status) {
 }
 
 async function refreshCurrentJob() {
-  if (!state.currentJobId) return;
+  if (!state.currentJobId) {
+    updateProgressDashboard(null, null);
+    return;
+  }
   try {
-    const [job, files, events, artifacts] = await Promise.all([
+    const [job, filesData, events, artifacts] = await Promise.all([
       apiFetch(`/api/v2/jobs/${state.currentJobId}`),
       apiFetch(`/api/v2/jobs/${state.currentJobId}/files`),
       apiFetch(`/api/v2/jobs/${state.currentJobId}/events?limit=300`),
@@ -226,9 +389,13 @@ async function refreshCurrentJob() {
     setJobBadge(`${job.status} | ${job.mode}`);
     updateJobControls(job.status);
 
-    renderFilesTable(files.files || []);
+    const files = filesData.files || [];
+    renderFilesTable(files);
     appendEventsLog(events.events || []);
     renderArtifacts(artifacts.artifacts || []);
+
+    // 2.1: Progress dashboard
+    updateProgressDashboard(job, files);
 
     if (FINAL_STATUSES.has(job.status)) {
       stopPolling();
@@ -242,13 +409,26 @@ async function refreshCurrentJob() {
 
 function startPolling() {
   stopPolling();
-  state.pollTimer = setInterval(refreshCurrentJob, 2000);
+  // Poll every 3 seconds for active jobs
+  state.pollTimer = setInterval(refreshCurrentJob, 3000);
 }
 
 function stopPolling() {
   if (state.pollTimer) {
     clearInterval(state.pollTimer);
     state.pollTimer = null;
+  }
+}
+
+function startQueuePolling() {
+  stopQueuePolling();
+  state.queueTimer = setInterval(refreshJobs, 5000);
+}
+
+function stopQueuePolling() {
+  if (state.queueTimer) {
+    clearInterval(state.queueTimer);
+    state.queueTimer = null;
   }
 }
 
@@ -338,6 +518,17 @@ async function retryJob() {
   }
 }
 
+async function retryFileJob(jobId) {
+  try {
+    const data = await apiFetch(`/api/v2/jobs/${jobId}/retry-failed`, { method: "POST" });
+    setJobBadge(`requeued: ${data.requeued_count}`);
+    startPolling();
+    if (jobId === state.currentJobId) refreshCurrentJob();
+  } catch (err) {
+    setJobBadge(`retry failed: ${err.message}`);
+  }
+}
+
 function bindEvents() {
   el("btnSaveApiBase").addEventListener("click", () => {
     state.apiBase = normalizeApiBase(el("apiBase").value);
@@ -362,7 +553,9 @@ function bindEvents() {
     await refreshCurrentJob();
   });
   el("btnReloadJobs").addEventListener("click", refreshJobs);
+  el("btnReloadQueue").addEventListener("click", refreshJobs);
 
+  // Monitor button in jobs table
   el("jobsTbody").addEventListener("click", (event) => {
     const button = event.target.closest(".btn-monitor");
     if (!button) return;
@@ -375,6 +568,30 @@ function bindEvents() {
     startPolling();
     refreshCurrentJob();
   });
+
+  // Monitor button in queue overview
+  el("activeJobsList").addEventListener("click", (event) => {
+    const button = event.target.closest(".btn-monitor-queue");
+    if (!button) return;
+    const jobId = button.getAttribute("data-job-id");
+    if (!jobId) return;
+    state.currentJobId = jobId;
+    saveUiState();
+    el("currentJob").textContent = jobId;
+    setJobBadge(`monitoring: ${jobId}`);
+    startPolling();
+    refreshCurrentJob();
+    window.scrollTo({ top: el("progressSection").offsetTop - 20, behavior: "smooth" });
+  });
+
+  // Per-file retry button (2.2)
+  el("filesTbody").addEventListener("click", (event) => {
+    const button = event.target.closest(".btn-retry-file");
+    if (!button) return;
+    const jobId = button.getAttribute("data-job-id");
+    if (!jobId) return;
+    retryFileJob(jobId);
+  });
 }
 
 async function init() {
@@ -385,17 +602,21 @@ async function init() {
   renderFilesTable([]);
   renderArtifacts([]);
   appendEventsLog([]);
+  updateProgressDashboard(null, null);
   await refreshHealth();
   await refreshJobs();
   if (state.currentJobId) {
     startPolling();
     await refreshCurrentJob();
   }
+  // 2.3: Start queue auto-refresh (every 5 seconds)
+  startQueuePolling();
 }
 
 window.addEventListener("beforeunload", () => {
   saveUiState();
   stopPolling();
+  stopQueuePolling();
 });
 
 window.addEventListener("DOMContentLoaded", () => {

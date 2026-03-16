@@ -21,6 +21,25 @@
         </div>
       </header>
 
+      <!-- 2.3: Queue Overview -->
+      <section class="card reveal" id="queueSection">
+        <div class="card-title-row">
+          <h2>Queue Overview</h2>
+          <div class="queue-meta">
+            <span id="queueLastUpdated" class="inline-note">-</span>
+            <button class="btn ghost" id="btnReloadQueue">Reload</button>
+          </div>
+        </div>
+        <div id="queueStats" class="queue-stats">
+          <span class="queue-stat" id="statRunning">running: –</span>
+          <span class="queue-stat" id="statQueued">queued: –</span>
+          <span class="queue-stat" id="statCompleted">completed: –</span>
+          <span class="queue-stat" id="statFailed">failed: –</span>
+          <span class="queue-stat" id="statCanceled">canceled: –</span>
+        </div>
+        <div id="activeJobsList" class="active-jobs-list"></div>
+      </section>
+
       <section class="card reveal">
         <div class="card-title-row">
           <h2>Connection</h2>
@@ -105,6 +124,28 @@
         </article>
       </section>
 
+      <!-- 2.1: Current Job Progress Dashboard -->
+      <section class="card reveal" id="progressSection" style="display:none">
+        <div class="card-title-row">
+          <h2>Job Progress</h2>
+          <div class="progress-meta">
+            <span id="progressJobId" class="mono inline-note"></span>
+            <span id="progressEta" class="inline-note"></span>
+          </div>
+        </div>
+        <div class="progress-overall-wrap">
+          <div class="progress-label-row">
+            <span id="progressLabel" class="progress-label">0%</span>
+            <span id="progressFilesLabel" class="progress-files-label">0 / 0 files</span>
+          </div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" id="progressBarFill" style="width:0%"></div>
+          </div>
+        </div>
+        <!-- Stage timeline per file -->
+        <div id="stageTimeline" class="stage-timeline"></div>
+      </section>
+
       <section class="grid two-col">
         <article class="card reveal">
           <div class="card-title-row">
@@ -118,6 +159,7 @@
                   <th>Job</th>
                   <th>Status</th>
                   <th>Mode</th>
+                  <th>Progress</th>
                   <th>Action</th>
                 </tr>
               </thead>
@@ -136,9 +178,11 @@
               <thead>
                 <tr>
                   <th>Input</th>
+                  <th>Stage</th>
                   <th>Status</th>
                   <th>Attempt</th>
                   <th>Error</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody id="filesTbody"></tbody>
