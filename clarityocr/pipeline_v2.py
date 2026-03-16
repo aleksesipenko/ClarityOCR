@@ -17,17 +17,51 @@ import httpx
 # Avoid circular imports, keep specific imports
 from .db import get_session, Job, JobFile, Worker, JobEvent
 from .job_manager import (
-    transition_file_status, 
+    transition_file_status,
     check_and_update_job_completion,
     update_worker_heartbeat,
     append_event,
-    record_artifact
+    record_artifact,
+    set_file_stage
 )
 from .converter import main as run_converter # We will call converter as a python module.
 from .naming import generate_naming # to be implemented
 from .metadata import generate_metadata # to be implemented
+from .structured_logger import get_logger
 
 logger = logging.getLogger("pipeline_v2")
+struct_log = get_logger("pipeline_v2")
+
+# =============================================================================
+# STAGE CONTEXT MANAGER (Phase 1.1)
+# =============================================================================
+
+from contextlib import contextmanager
+
+@contextmanager
+def _stage_context(file_id: str, job_id: str, stage: str, pages_total: Optional[int] = None):
+    """
+    Context manager for tracking file processing stages.
+    Sets stage on entry, emits events, tracks duration.
+    """
+    start_time = time.time()
+    with get_session() as session:
+        set_file_stage(session, file_id, stage, progress_pct=0, pages_total=pages_total)
+        append_event(session, job_id, f"stage_{stage}_started", file_id=file_id)
+
+    try:
+        yield
+    finally:
+        duration_ms = int((time.time() - start_time) * 1000)
+        with get_session() as session:
+            set_file_stage(session, file_id, stage, progress_pct=100)
+            append_event(
+                session,
+                job_id,
+                f"stage_{stage}_completed",
+                file_id=file_id,
+                payload={"duration_ms": duration_ms}
+            )
 
 # Constants from Implementation Plan v2.2.1
 HEARTBEAT_INTERVAL_SEC = 5
@@ -433,6 +467,7 @@ class PipelineWorker(threading.Thread):
     def _process_file(self, file_id: str, job_id: str, input_path: str):
         start_time = time.time()
         logger.info(f"Worker {self.worker_id} processing file {file_id}: {input_path}")
+        struct_log.info("File processing started", job_id=job_id, file_id=file_id, worker_id=self.worker_id, input_path=input_path)
         
         try:
             # 1. Fetch Job context to know mode and config
@@ -446,60 +481,71 @@ class PipelineWorker(threading.Thread):
                 # Output dir format: output_root/job_id/file_id
                 output_dir = os.path.join("output_v2", job_id, file_id)
                 os.makedirs(output_dir, exist_ok=True)
-                
-                # Execute converter (this calls marker-pdf etc.)
-                # In actual implementation, we call it via subprocess to isolate VRAM and crash safety
-                import sys
-                import subprocess
-                cmd = [
-                    sys.executable, "-u", "-m", "clarityocr.converter", 
-                    "--output-dir", output_dir, 
-                    "--pdf", input_path
-                ]
-                # Map preset to batch parameters
-                p_vals = {"speed": (2,4,4), "balanced": (4,8,8), "quality": (8,16,16)}.get(preset, (4,8,8))
-                cmd += ["--layout-batch", str(p_vals[0]), "--recognition-batch", str(p_vals[1]), "--detection-batch", str(p_vals[2])]
-                
-                env = dict(os.environ)
-                env["PYTHONIOENCODING"] = "utf-8"
-                env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
-                
-                project_root = str(Path(__file__).resolve().parent.parent)
-                result = subprocess.run(
-                    cmd,
-                    cwd=project_root,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    timeout=600,
-                    env=env,
-                )
 
-                # Prefer deterministic expected path, then fall back to discovered markdown.
-                base_name = Path(input_path).stem
-                md_path = os.path.join(output_dir, f"{base_name}.md")
+                # Get page count for progress tracking
+                page_count = None
+                try:
+                    from .converter import get_page_count
+                    page_count = get_page_count(input_path)
+                except Exception:
+                    pass
 
-                if result.returncode != 0:
-                    logger.warning("Primary converter failed, fallback to simple converter: %s", result.stdout)
-                    _fallback_markdown_from_input(input_path, md_path)
+                # Execute converter (this calls marker-pdf etc.) with stage tracking
+                with _stage_context(file_id, job_id, "ocr", pages_total=page_count):
+                    # In actual implementation, we call it via subprocess to isolate VRAM and crash safety
+                    import sys
+                    import subprocess
+                    cmd = [
+                        sys.executable, "-u", "-m", "clarityocr.converter",
+                        "--output-dir", output_dir,
+                        "--pdf", input_path
+                    ]
+                    # Map preset to batch parameters
+                    p_vals = {"speed": (2,4,4), "balanced": (4,8,8), "quality": (8,16,16)}.get(preset, (4,8,8))
+                    cmd += ["--layout-batch", str(p_vals[0]), "--recognition-batch", str(p_vals[1]), "--detection-batch", str(p_vals[2])]
 
-                if not os.path.exists(md_path):
-                    discovered = sorted(Path(output_dir).glob("*.md"))
-                    if discovered:
-                        md_path = str(discovered[0])
-                        base_name = Path(md_path).stem
-                    else:
-                        logger.warning(
-                            "Primary converter produced no markdown. Fallback to simple converter for %s",
-                            input_path,
-                        )
+                    env = dict(os.environ)
+                    env["PYTHONIOENCODING"] = "utf-8"
+                    env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+
+                    project_root = str(Path(__file__).resolve().parent.parent)
+                    result = subprocess.run(
+                        cmd,
+                        cwd=project_root,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        timeout=600,
+                        env=env,
+                    )
+
+                    # Prefer deterministic expected path, then fall back to discovered markdown.
+                    base_name = Path(input_path).stem
+                    md_path = os.path.join(output_dir, f"{base_name}.md")
+
+                    if result.returncode != 0:
+                        logger.warning("Primary converter failed, fallback to simple converter: %s", result.stdout)
                         _fallback_markdown_from_input(input_path, md_path)
-                        if os.path.exists(md_path):
+
+                    if not os.path.exists(md_path):
+                        discovered = sorted(Path(output_dir).glob("*.md"))
+                        if discovered:
+                            md_path = str(discovered[0])
                             base_name = Path(md_path).stem
                         else:
-                            raise FileNotFoundError(f"Markdown output not found at {md_path}")
+                            logger.warning(
+                                "Primary converter produced no markdown. Fallback to simple converter for %s",
+                                input_path,
+                            )
+                            _fallback_markdown_from_input(input_path, md_path)
+                            if os.path.exists(md_path):
+                                base_name = Path(md_path).stem
+                            else:
+                                raise FileNotFoundError(f"Markdown output not found at {md_path}")
 
-                polish_result = self._try_optional_polish(md_path, mode, config, job_id, file_id)
+                # Polish stage (outside OCR context)
+                with _stage_context(file_id, job_id, "polish"):
+                    polish_result = self._try_optional_polish(md_path, mode, config, job_id, file_id)
                 with open(md_path, "r", encoding="utf-8") as md_file:
                     md_text = md_file.read()
                 _assert_non_empty_ocr_text(md_text, md_path)
@@ -541,7 +587,9 @@ class PipelineWorker(threading.Thread):
                 
                 # 4. Mark success
                 duration_ms = int((time.time() - start_time) * 1000)
+                struct_log.info("File processing completed", job_id=job_id, file_id=file_id, duration_ms=duration_ms, stage="done")
                 with get_session() as session:
+                    set_file_stage(session, file_id, "done", progress_pct=100)
                     transition_file_status(session, file_id, "completed", duration_ms=duration_ms)
                     append_event(session, job_id, "file_done", file_id=file_id, payload={"duration_ms": duration_ms})
                 self._post_file_finalize(job_id)
@@ -553,9 +601,10 @@ class PipelineWorker(threading.Thread):
 
                 inputs = config.get("inputs", [])
                 order_by = config.get("naming_policy", "filename")
-                
-                from .merger import merge_pipeline
-                report = merge_pipeline(inputs, output_dir, order_by)
+
+                with _stage_context(file_id, job_id, "merge"):
+                    from .merger import merge_pipeline
+                    report = merge_pipeline(inputs, output_dir, order_by)
                 
                 report_path = os.path.join(output_dir, "merge_report.json")
                 out_pdf = os.path.join(output_dir, "merged.pdf")
@@ -645,6 +694,7 @@ class PipelineWorker(threading.Thread):
                 # Mark success
                 duration_ms = int((time.time() - start_time) * 1000)
                 with get_session() as session:
+                    set_file_stage(session, file_id, "done", progress_pct=100)
                     transition_file_status(session, file_id, "completed", duration_ms=duration_ms)
                     append_event(session, job_id, "file_done", file_id=file_id, payload={"duration_ms": duration_ms})
                 self._post_file_finalize(job_id)
@@ -652,6 +702,7 @@ class PipelineWorker(threading.Thread):
         except Exception as e:
             logger.error(f"Error processing file {file_id}: {traceback.format_exc()}")
             duration_ms = int((time.time() - start_time) * 1000)
+            struct_log.error("File processing failed", job_id=job_id, file_id=file_id, duration_ms=duration_ms, error=str(e))
             with get_session() as session:
                 f_db = session.query(JobFile).filter_by(id=file_id).first()
                 if not f_db:

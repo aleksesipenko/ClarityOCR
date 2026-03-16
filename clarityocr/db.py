@@ -43,7 +43,7 @@ class Job(Base):
 
 class JobFile(Base):
     __tablename__ = 'job_files'
-    
+
     id = Column(String, primary_key=True) # uuid
     job_id = Column(String, ForeignKey('jobs.job_id'), nullable=False, index=True)
     input_path = Column(String, nullable=False)
@@ -54,7 +54,14 @@ class JobFile(Base):
     last_error_message = Column(Text, nullable=True)
     duration_ms = Column(Integer, nullable=True)
     version = Column(Integer, nullable=False, default=1) # Optimistic locking
-    
+
+    # Phase 1.1: Job Stage Model
+    stage = Column(String, nullable=True) # upload/ocr/merge/polish/convert/done
+    stage_started_at = Column(DateTime, nullable=True)
+    stage_progress_pct = Column(Integer, nullable=True) # 0-100
+    pages_total = Column(Integer, nullable=True)
+    pages_done = Column(Integer, nullable=True)
+
     job = relationship("Job", back_populates="files")
     artifacts = relationship("Artifact", back_populates="file", cascade="all, delete-orphan")
     events = relationship("JobEvent", back_populates="file", cascade="all, delete-orphan")

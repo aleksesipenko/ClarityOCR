@@ -265,3 +265,34 @@ def record_artifact(session: Session, job_id: str, file_id: str, type: str, path
     session.add(artifact)
     session.commit()
     return artifact
+
+def set_file_stage(
+    session: Session,
+    file_id: str,
+    stage: str,
+    progress_pct: Optional[int] = None,
+    pages_total: Optional[int] = None,
+    pages_done: Optional[int] = None
+) -> JobFile:
+    """
+    Update file stage tracking (Phase 1.1).
+    Sets stage, stage_started_at, and optional progress fields.
+    """
+    db_file = session.query(JobFile).filter_by(id=file_id).one()
+
+    # Only update stage_started_at when stage changes
+    if db_file.stage != stage:
+        db_file.stage = stage
+        db_file.stage_started_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    if progress_pct is not None:
+        db_file.stage_progress_pct = min(100, max(0, progress_pct))
+
+    if pages_total is not None:
+        db_file.pages_total = pages_total
+
+    if pages_done is not None:
+        db_file.pages_done = pages_done
+
+    session.commit()
+    return db_file
