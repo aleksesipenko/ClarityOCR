@@ -34,6 +34,18 @@ import shutil
 
 warnings.filterwarnings("ignore")
 
+# Import structured logger (lazy to avoid circular imports)
+_struct_log = None
+def _get_struct_log():
+    global _struct_log
+    if _struct_log is None:
+        try:
+            from .structured_logger import get_logger
+            _struct_log = get_logger("converter")
+        except Exception:
+            _struct_log = None
+    return _struct_log
+
 # =============================================================================
 # DEVICE UTILITIES
 # =============================================================================
@@ -1260,6 +1272,11 @@ def main():
         log_info(f"PDF [{idx}/{len(pdf_info)}] {pdf_name}")
         log_debug(f"  Expected pages: {expected_pages}, Timeout: {timeout_str}")
 
+        # Structured logging
+        slog = _get_struct_log()
+        if slog:
+            slog.info("PDF conversion started", file_name=pdf_name, expected_pages=expected_pages, timeout_s=timeout_s)
+
         with _print_lock:
             print(f"\n{'─' * 70}")
             print(f"[{idx}/{len(pdf_info)}] {short_name}")
@@ -1408,6 +1425,10 @@ def main():
                 )
                 log_debug(f"  Speed: {pages_per_min:.1f} p/min, VRAM: {vram:.1f}GB, batch={bs}")
 
+                # Structured logging
+                if slog:
+                    slog.info("PDF conversion completed", file_name=pdf_name, actual_pages=actual_pages, duration_ms=int(pdf_time * 1000), pages_per_min=pages_per_min)
+
                 # Emit OCR text preview for Web UI (first 1000 chars)
                 emit_ocr_preview(pdf_name, text, actual_pages)
 
@@ -1452,6 +1473,8 @@ def main():
             with results_lock:
                 failed += 1
             log_error(f"  FAILED: {last_error}")
+            if slog:
+                slog.error("PDF conversion failed", file_name=pdf_name, error=str(last_error), timed_out=timed_out)
             with _print_lock:
                 if timed_out:
                     print(f"\n✗ TIMEOUT: PDF conversion exceeded time limit")
