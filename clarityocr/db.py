@@ -69,14 +69,18 @@ class JobFile(Base):
 
 class Artifact(Base):
     __tablename__ = 'artifacts'
-    
+
     id = Column(String, primary_key=True)
     job_id = Column(String, ForeignKey('jobs.job_id'), nullable=True, index=True)
     file_id = Column(String, ForeignKey('job_files.id'), nullable=True, index=True)
     type = Column(String, nullable=False) # md, meta, naming, pdf, report, raw.md
     path = Column(String, nullable=False)
     sha256 = Column(String, nullable=True)
-    
+
+    # Phase 4.3: Graceful Degradation
+    degraded = Column(Boolean, nullable=False, default=False)
+    degradation_reason = Column(String, nullable=True)
+
     job = relationship("Job", back_populates="artifacts")
     file = relationship("JobFile", back_populates="artifacts")
 

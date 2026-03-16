@@ -241,7 +241,16 @@ def update_worker_heartbeat(session: Session, worker_id: str, gpu_id: Optional[s
             worker.gpu_id = gpu_id
     session.commit()
 
-def record_artifact(session: Session, job_id: str, file_id: str, type: str, path: str, sha256: str = None):
+def record_artifact(
+    session: Session,
+    job_id: str,
+    file_id: str,
+    type: str,
+    path: str,
+    sha256: str = None,
+    degraded: bool = False,
+    degradation_reason: str = None
+):
     """Save an artifact record to the db."""
     existing = (
         session.query(Artifact)
@@ -251,7 +260,10 @@ def record_artifact(session: Session, job_id: str, file_id: str, type: str, path
     if existing:
         if sha256 and not existing.sha256:
             existing.sha256 = sha256
-            session.commit()
+        if degraded:
+            existing.degraded = degraded
+            existing.degradation_reason = degradation_reason
+        session.commit()
         return existing
 
     artifact = Artifact(
@@ -260,7 +272,9 @@ def record_artifact(session: Session, job_id: str, file_id: str, type: str, path
         file_id=file_id,
         type=type,
         path=path,
-        sha256=sha256
+        sha256=sha256,
+        degraded=degraded,
+        degradation_reason=degradation_reason
     )
     session.add(artifact)
     session.commit()
