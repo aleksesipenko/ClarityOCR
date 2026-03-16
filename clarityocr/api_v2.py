@@ -255,10 +255,42 @@ def list_jobs(
 
 @router.get("/jobs/{job_id}")
 def get_job_status(job_id: str):
+    """
+    Get job status with progress and ETA (Phase 1.4).
+    Returns: overall_progress_pct, eta_seconds, files_done, files_total.
+    """
     with get_session() as session:
         job = session.query(Job).filter_by(job_id=job_id).first()
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
+        files = session.query(JobFile).filter_by(job_id=job_id).all()
+
+        # Calculate progress
+        files_total = len(files)
+        files_done = sum(1 for f in files if f.status == "completed")
+
+        # Calculate overall progress from pages
+        total_pages = sum(f.pages_total or 0 for f in files if f.pages_total)
+        done_pages = sum(f.pages_done or 0 for f in files if f.pages_done)
+
+        if total_pages > 0:
+            overall_progress_pct = int((done_pages / total_pages) * 100)
+        elif files_total > 0:
+            overall_progress_pct = int((files_done / files_total) * 100)
+        else:
+            overall_progress_pct = 0
+
+        # Calculate ETA (linear extrapolation)
+        eta_seconds = None
+        if files_total > 0 and files_done > 0 and files_done < files_total:
+            # Use average time per completed file
+            completed_files = [f for f in files if f.status == "completed" and f.duration_ms]
+            if completed_files:
+                avg_duration_ms = sum(f.duration_ms for f in completed_files) / len(completed_files)
+                remaining_files = files_total - files_done
+                eta_seconds = int((remaining_files * avg_duration_ms) / 1000)
+
         config = _parse_payload(job.config)
         return {
             "job_id": job.job_id,
@@ -270,11 +302,20 @@ def get_job_status(job_id: str):
             "created_at": job.created_at,
             "accepted_at": job.accepted_at,
             "config": config,
+            # Phase 1.4: Progress/ETA
+            "overall_progress_pct": overall_progress_pct,
+            "eta_seconds": eta_seconds,
+            "files_done": files_done,
+            "files_total": files_total,
         }
 
 
 @router.get("/jobs/{job_id}/files")
 def get_job_files(job_id: str):
+    """
+    Get job files with stage, progress, and page tracking (Phase 1.4).
+    Returns: stage, stage_progress_pct, pages_done, pages_total, duration_ms.
+    """
     with get_session() as session:
         files = session.query(JobFile).filter_by(job_id=job_id).all()
         return {
@@ -288,6 +329,11 @@ def get_job_files(job_id: str):
                     "max_attempts": f.max_attempts,
                     "duration_ms": f.duration_ms,
                     "error": f.last_error_message,
+                    # Phase 1.4: Stage and progress tracking
+                    "stage": f.stage,
+                    "stage_progress_pct": f.stage_progress_pct,
+                    "pages_done": f.pages_done,
+                    "pages_total": f.pages_total,
                 }
                 for f in files
             ],
@@ -412,6 +458,56 @@ def liveness():
     return {"status": "alive"}
 
 
+def _probe_ocr_core() -> str:
+    """Probe OCR core (marker-pdf availability)."""
+    try:
+        import marker  # noqa
+        return "ready"
+    except ImportError:
+        return "unavailable"
+    except Exception:
+        return "error"
+
+
+def _probe_db() -> str:
+    """Probe database connectivity."""
+    try:
+        with get_session() as session:
+            # Simple query to check DB is responsive
+            session.execute("SELECT 1")
+        return "ready"
+    except Exception:
+        return "unavailable"
+
+
+def _probe_llm() -> str:
+    """Probe LLM service (optional polish)."""
+    import os
+    llm_base_url = os.getenv("V2_LLM_BASE_URL", "http://localhost:1234/v1")
+
+    # Quick check if LLM endpoint is configured
+    if not llm_base_url or llm_base_url == "http://localhost:1234/v1":
+        # Default unconfigured state
+        return "not_configured"
+
+    try:
+        import httpx
+        response = httpx.get(f"{llm_base_url.rstrip('/')}/models", timeout=2.0)
+        if response.status_code == 200:
+            return "ready"
+        return "degraded"
+    except Exception:
+        return "unavailable"
+
+
 @router.get("/health/ready", response_model=HealthReadyResponse, summary="Readiness Check")
 def readiness():
-    return HealthReadyResponse(ocr_core="ready", db="ready", llm="degraded")
+    """
+    Enhanced readiness check with real component probes (Phase 1.3).
+    Returns nested status for OCR core, database, and LLM service.
+    """
+    return HealthReadyResponse(
+        ocr_core=_probe_ocr_core(),
+        db=_probe_db(),
+        llm=_probe_llm()
+    )
