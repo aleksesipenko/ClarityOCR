@@ -67,13 +67,22 @@ function newRequestId() {
 function setReadyBadge(kind, text) {
   const badge = el("readyBadge");
   badge.textContent = text;
-  badge.style.background =
-    kind === "ok" ? "#def8ea" : kind === "warn" ? "#fff2dc" : "#ffe3de";
-  badge.style.color = kind === "ok" ? "#155c38" : kind === "warn" ? "#825b10" : "#8b2d22";
+  badge.className = "badge " + (kind === "ok" ? "badge-green" : kind === "warn" ? "badge-amber" : "badge-red");
 }
 
 function setJobBadge(text) {
   el("jobBadge").textContent = text;
+}
+
+// ─── Topbar clock ──────────────────────────────────────────────
+function startClock() {
+  const clockEl = el("topbarClock");
+  if (!clockEl) return;
+  function tick() {
+    clockEl.textContent = new Date().toLocaleTimeString();
+  }
+  tick();
+  setInterval(tick, 1000);
 }
 
 function appendEventsLog(events) {
@@ -176,13 +185,19 @@ function updateProgressDashboard(job, files) {
   el("progressJobId").textContent = job.job_id;
   el("progressFilesLabel").textContent = `${job.files_done ?? 0} / ${job.files_total ?? 0} files`;
 
-  // ETA
+  // ETA + elapsed time
   if (job.eta_seconds != null && job.eta_seconds > 0) {
     const mins = Math.floor(job.eta_seconds / 60);
     const secs = job.eta_seconds % 60;
     el("progressEta").textContent = `ETA: ${mins > 0 ? mins + "m " : ""}${secs}s`;
   } else if (FINAL_STATUSES.has(job.status)) {
     el("progressEta").textContent = `✓ ${job.status}`;
+  } else if (job.accepted_at && !FINAL_STATUSES.has(job.status)) {
+    const startTime = new Date(job.accepted_at + "Z");
+    const elapsed = Math.floor((Date.now() - startTime.getTime()) / 1000);
+    const eMin = Math.floor(elapsed / 60);
+    const eSec = elapsed % 60;
+    el("progressEta").textContent = `⏱ ${eMin > 0 ? eMin + "m " : ""}${eSec}s elapsed`;
   } else {
     el("progressEta").textContent = "";
   }
@@ -597,6 +612,7 @@ function bindEvents() {
 async function init() {
   loadUiState();
   bindEvents();
+  startClock();
   updateJobControls(null);
   renderSelectedFiles([]);
   renderFilesTable([]);

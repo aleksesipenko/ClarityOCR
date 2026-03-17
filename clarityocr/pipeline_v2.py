@@ -711,9 +711,10 @@ class PipelineWorker(threading.Thread):
 
                 # Execute converter (this calls marker-pdf etc.) with stage tracking
                 with _stage_context(file_id, job_id, "ocr", pages_total=page_count):
-                    # In actual implementation, we call it via subprocess to isolate VRAM and crash safety
+                    # Subprocess isolation for VRAM safety; Popen for live progress
                     import sys
                     import subprocess
+                    import select as _select
                     cmd = [
                         sys.executable, "-u", "-m", "clarityocr.converter",
                         "--output-dir", output_dir,
@@ -729,26 +730,86 @@ class PipelineWorker(threading.Thread):
 
                     project_root = str(Path(__file__).resolve().parent.parent)
 
+                    # --- Live progress tracking via Popen ---
+                    EST_SECONDS_PER_PAGE = 4
+                    PROGRESS_INTERVAL = 5  # seconds between DB updates
+                    TIMEOUT_SEC = 600
+
                     try:
-                        result = subprocess.run(
+                        proc = subprocess.Popen(
                             cmd,
                             cwd=project_root,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
                             text=True,
-                            timeout=600,
                             env=env,
-                        )
-                    except subprocess.TimeoutExpired:
-                        raise PipelineError(
-                            ErrorCode.E_NETWORK_TIMEOUT,
-                            f"OCR converter timed out after 600s for {input_path}"
                         )
                     except FileNotFoundError:
                         raise PipelineError(
                             ErrorCode.E_INVALID_PDF,
                             f"Input file not found or inaccessible: {input_path}"
                         )
+
+                    ocr_start = time.time()
+                    last_progress_update = 0.0
+                    stdout_lines = []
+                    estimated_total = max((page_count or 50) * EST_SECONDS_PER_PAGE, 30)
+
+                    try:
+                        while True:
+                            ready, _, _ = _select.select([proc.stdout], [], [], PROGRESS_INTERVAL)
+                            if ready:
+                                line = proc.stdout.readline()
+                                if not line:
+                                    break  # EOF
+                                stdout_lines.append(line)
+                                if line.strip().startswith("[OCR_PREVIEW]"):
+                                    with get_session() as session:
+                                        set_file_stage(session, file_id, "ocr",
+                                                       progress_pct=95,
+                                                       pages_done=page_count,
+                                                       pages_total=page_count)
+
+                            elapsed = time.time() - ocr_start
+                            if elapsed - last_progress_update >= PROGRESS_INTERVAL:
+                                est_pct = min(int((elapsed / estimated_total) * 100), 90)
+                                est_pages = min(
+                                    int((elapsed / estimated_total) * (page_count or 0)),
+                                    (page_count or 1) - 1
+                                ) if page_count else None
+                                with get_session() as session:
+                                    set_file_stage(session, file_id, "ocr",
+                                                   progress_pct=est_pct,
+                                                   pages_done=est_pages,
+                                                   pages_total=page_count)
+                                last_progress_update = elapsed
+
+                            if elapsed > TIMEOUT_SEC:
+                                proc.kill()
+                                proc.wait()
+                                raise PipelineError(
+                                    ErrorCode.E_NETWORK_TIMEOUT,
+                                    f"OCR converter timed out after {TIMEOUT_SEC}s for {input_path}"
+                                )
+
+                            if proc.poll() is not None:
+                                for remaining in proc.stdout:
+                                    stdout_lines.append(remaining)
+                                break
+                    except PipelineError:
+                        raise
+                    except Exception:
+                        proc.kill()
+                        proc.wait()
+                        raise
+
+                    returncode = proc.wait()
+
+                    class _SubprocResult:
+                        pass
+                    result = _SubprocResult()
+                    result.returncode = returncode
+                    result.stdout = "".join(stdout_lines)
 
                     # Prefer deterministic expected path, then fall back to discovered markdown.
                     base_name = Path(input_path).stem
