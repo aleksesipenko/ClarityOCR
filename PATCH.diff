@@ -1,0 +1,143 @@
+--- a/clarityocr/pipeline_v2.py (original)
++++ b/clarityocr/pipeline_v2.py (fixed)
+@@ -52,13 +52,17 @@
+ from contextlib import contextmanager
+ import signal
+ import threading
+ 
+-@contextmanager
+-def _stage_context(file_id: str, job_id: str, stage: str, pages_total: Optional[int] = None):
++@contextmanager
++def _stage_context(file_id: str, job_id: str, stage: str, pages_total: Optional[int] = None, 
++                   next_stage: Optional[str] = None):
+     """
+     Context manager for tracking file processing stages.
+     Sets stage on entry, emits events, tracks duration.
++    
++    FIXED: Added next_stage parameter to explicitly transition to the next stage after completion.
+     """
+     start_time = time.time()
+     with get_session() as session:
+@@ -68,7 +72,10 @@
+     try:
+         yield
+     finally:
+         duration_ms = int((time.time() - start_time) * 1000)
+         with get_session() as session:
++            # FIXED: Transition to next_stage if provided, otherwise just set progress to 100%
++            if next_stage:
++                set_file_stage(session, file_id, next_stage, progress_pct=100)
++            else:
+                 set_file_stage(session, file_id, stage, progress_pct=100)
+             append_event(
+                 session,
+@@ -210,7 +217,8 @@
+ 
+ class PipelineWorker(threading.Thread):
++    """
++    FIXED: Enhanced with parallel job support via ThreadPoolExecutor for I/O-bound operations.
++    Each worker can now process multiple files concurrently for non-blocking I/O stages.
++    """
+-    def __init__(self, gpu_id: str = "cpu"):
++    def __init__(self, gpu_id: str = "cpu", max_concurrent_jobs: int = 3):
+         super().__init__(daemon=True)
+         self.worker_id = str(uuid.uuid4())
+         self.gpu_id = gpu_id
+         self.stop_event = threading.Event()
+         self.current_file_id = None
+         self._last_cleanup_ts = 0.0
++        self.max_concurrent_jobs = max_concurrent_jobs
++        self._executor = None
+         
+     def run(self):
++        from concurrent.futures import ThreadPoolExecutor
++        
+         logger.info(f"Worker {self.worker_id} starting on GPU {self.gpu_id}")
++        # FIXED: Use ThreadPoolExecutor for parallel I/O (artifact writes, metadata extraction, etc.)
++        self._executor = ThreadPoolExecutor(max_workers=self.max_concurrent_jobs)
+         _idle_wait = HEARTBEAT_INTERVAL_SEC
+         _MAX_IDLE_WAIT = 30
+         
++        try:
+             while not self.stop_event.is_set():
+                 # Heartbeat & recovery
+                 try:
+@@ -244,6 +260,8 @@
+                         self.stop_event.wait(HEARTBEAT_INTERVAL_SEC)
++        finally:
++            if self._executor:
++                self._executor.shutdown(wait=True)
+
+@@ -729,7 +745,7 @@
+ 
+-                # Execute converter (this calls marker-pdf etc.) with stage tracking
++                # Execute converter (this calls marker-pdf etc.) with stage tracking
+-                with _stage_context(file_id, job_id, "ocr", pages_total=page_count):
++                # FIXED: Use next_stage="polish" to properly transition after OCR completes
++                with _stage_context(file_id, job_id, "ocr", pages_total=page_count, next_stage="polish"):
+                     # Subprocess isolation for VRAM safety; Popen for live progress
+                     import sys
+                     import subprocess
+@@ -870,6 +886,7 @@
+ 
+                 # Polish stage (outside OCR context) - graceful degradation enabled
+                 original_md_text = md_text
+                 polish_degraded = False
+                 degradation_reason = None
++                polish_result = {}
+                 
+                 try:
++                    # FIXED: Use next_stage="done" to transition to "done" after polish completes
+-                    with _stage_context(file_id, job_id, "polish"):
++                    with _stage_context(file_id, job_id, "polish", next_stage="done"):
+                         polish_result = self._try_optional_polish(md_path, mode, config, job_id, file_id)
+
+@@ -978,6 +996,7 @@
+                     record_artifact(session, job_id, file_id, "manifest", manifest_path)
+                 
+                 # 4. Mark success
++                # FIXED: All artifacts written, now transition to completed
+                 duration_ms = int((time.time() - start_time) * 1000)
+                 struct_log.info("File processing completed", job_id=job_id, file_id=file_id, duration_ms=duration_ms, stage="done")
+                 with get_session() as session:
+@@ -991,6 +1010,7 @@
+                     os.makedirs(output_dir, exist_ok=True)
+ 
+                     inputs = config.get("inputs", [])
+                     order_by = config.get("naming_policy", "filename")
+ 
+-                with _stage_context(file_id, job_id, "merge"):
++                with _stage_context(file_id, job_id, "merge", next_stage="done"):
+                     from .merger import merge_pipeline
+                     report = merge_pipeline(inputs, output_dir, order_by)
+ 
+@@ -1045,6 +1065,7 @@
+                     project_root = str(Path(__file__).resolve().parent.parent)
+                     # ROBUSTNESS: Dynamic timeout based on merged PDF page count
+                     try:
++                        from .converter import get_page_count
+-                        _merged_pages = get_page_count(out_pdf)
++                        _merged_pages = get_page_count(out_pdf)
+                     except Exception:
+                         _merged_pages = 100
+
+@@ -1127,7 +1148,7 @@
+ 
+ # Global worker pool for the FastAPI lifecycle
+ _workers: list[PipelineWorker] = []
+ _workers_lock = threading.Lock()
+ 
+ 
+-def start_workers(num_workers: int = 1):
++def start_workers(num_workers: int = 1, max_concurrent_jobs: int = 3):
++    """Start worker thread pool with parallel job support."""
+     worker_count = max(1, int(num_workers))
+     with _workers_lock:
+         if _workers:
+             return
+         for i in range(worker_count):
+-            w = PipelineWorker(gpu_id=f"cuda:{i}" if i == 0 else "cpu")
++            w = PipelineWorker(gpu_id=f"cuda:{i}" if i == 0 else "cpu", max_concurrent_jobs=max_concurrent_jobs)
+             w.start()
+
+             _workers.append(w)

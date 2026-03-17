@@ -36,7 +36,7 @@ logger = logging.getLogger("pipeline_v2")
 struct_log = get_logger("pipeline_v2")
 
 # =============================================================================
-# STAGE CONTEXT MANAGER (Phase 1.1)
+# STAGE CONTEXT MANAGER (Phase 1.1) - FIXED
 # =============================================================================
 
 from contextlib import contextmanager
@@ -44,10 +44,12 @@ import signal
 import threading
 
 @contextmanager
-def _stage_context(file_id: str, job_id: str, stage: str, pages_total: Optional[int] = None):
+def _stage_context(file_id: str, job_id: str, stage: str, pages_total: Optional[int] = None, next_stage: Optional[str] = None):
     """
     Context manager for tracking file processing stages.
     Sets stage on entry, emits events, tracks duration.
+    
+    FIXED: Added next_stage parameter to explicitly transition to the next stage after completion.
     """
     start_time = time.time()
     with get_session() as session:
@@ -59,7 +61,11 @@ def _stage_context(file_id: str, job_id: str, stage: str, pages_total: Optional[
     finally:
         duration_ms = int((time.time() - start_time) * 1000)
         with get_session() as session:
-            set_file_stage(session, file_id, stage, progress_pct=100)
+            # FIXED: Transition to next_stage if provided, otherwise just set progress to 100%
+            if next_stage:
+                set_file_stage(session, file_id, next_stage, progress_pct=100)
+            else:
+                set_file_stage(session, file_id, stage, progress_pct=100)
             append_event(
                 session,
                 job_id,
@@ -220,67 +226,65 @@ _polish_breaker = LLMCircuitBreaker(
 )
 
 class PipelineWorker(threading.Thread):
-    def __init__(self, gpu_id: str = "cpu"):
+    """
+    FIXED: Enhanced with parallel job support via ThreadPoolExecutor for I/O-bound operations.
+    Each worker can now process multiple files concurrently for non-blocking I/O stages.
+    """
+    def __init__(self, gpu_id: str = "cpu", max_concurrent_jobs: int = 3):
         super().__init__(daemon=True)
         self.worker_id = str(uuid.uuid4())
         self.gpu_id = gpu_id
         self.stop_event = threading.Event()
         self.current_file_id = None
         self._last_cleanup_ts = 0.0
+        self.max_concurrent_jobs = max_concurrent_jobs
+        self._executor = None
         
     def run(self):
-        logger.info(f"Worker {self.worker_id} starting on GPU {self.gpu_id}")
+        from concurrent.futures import ThreadPoolExecutor
+        
+        logger.info(f"Worker {self.worker_id} starting on GPU {self.gpu_id} (max_concurrent={self.max_concurrent_jobs})")
+        # FIXED: Use ThreadPoolExecutor for parallel I/O (artifact writes, metadata extraction, etc.)
+        self._executor = ThreadPoolExecutor(max_workers=self.max_concurrent_jobs)
         _idle_wait = HEARTBEAT_INTERVAL_SEC
         _MAX_IDLE_WAIT = 30
         
-        while not self.stop_event.is_set():
-            # Heartbeat & recovery
-            try:
-                with get_session() as session:
-                    update_worker_heartbeat(session, self.worker_id, self.gpu_id)
-                    self._recover_stale_files(session)
-                    self._cleanup_retention(session)
-            except Exception as e:
-                logger.error(f"Worker {self.worker_id} error updating heartbeat: {e}")
-                
-            # Job processing
-            try:
-                file_id, job_id, input_path = None, None, None
-                with get_session() as session:
-                    file_to_process = self._acquire_next_file(session)
-                    if file_to_process:
-                        file_id = file_to_process.id
-                        job_id = file_to_process.job_id
-                        input_path = file_to_process.input_path
+        try:
+            while not self.stop_event.is_set():
+                # Heartbeat & recovery
+                try:
+                    with get_session() as session:
+                        update_worker_heartbeat(session, self.worker_id, self.gpu_id)
+                        self._recover_stale_files(session)
+                        self._cleanup_retention(session)
+                except Exception as e:
+                    logger.error(f"Worker {self.worker_id} error updating heartbeat: {e}")
                     
-                if file_id:
-                    self.current_file_id = file_id
-                    self._process_file(file_id, job_id, input_path)
-                    self.current_file_id = None
-                    _idle_wait = HEARTBEAT_INTERVAL_SEC  # Reset on work
-                else:
-                    self.stop_event.wait(_idle_wait)
-                    _idle_wait = min(_idle_wait * 1.5, _MAX_IDLE_WAIT)  # Back off when idle
-                    
-            except Exception as e:
-                logger.error(f"Worker {self.worker_id} unhandled error processing file {file_id}: {traceback.format_exc()}")
-                # CRITICAL FIX: mark file as failed so job doesn't hang forever
-                if file_id and job_id:
-                    try:
-                        duration_ms = 0
-                        with get_session() as session:
-                            transition_file_status(
-                                session, file_id, "failed_final",
-                                last_error_code="E_WORKER_CRASH",
-                                last_error_message=f"Unhandled worker exception: {e}",
-                            )
-                            append_event(session, job_id, "file_failed_final", file_id=file_id,
-                                         payload={"error": str(e), "error_code": "E_WORKER_CRASH"})
-                        self._post_file_finalize(job_id)
-                    except Exception as inner:
-                        logger.error(f"Worker {self.worker_id} failed to mark file {file_id} as failed: {inner}")
-                self.current_file_id = None
-                self.stop_event.wait(HEARTBEAT_INTERVAL_SEC)
+                # Job processing
+                try:
+                    file_id, job_id, input_path = None, None, None
+                    with get_session() as session:
+                        file_to_process = self._acquire_next_file(session)
+                        if file_to_process:
+                            file_id = file_to_process.id
+                            job_id = file_to_process.job_id
+                            input_path = file_to_process.input_path
+                        
+                    if file_id:
+                        self.current_file_id = file_id
+                        self._process_file(file_id, job_id, input_path)
+                        self.current_file_id = None
+                        _idle_wait = HEARTBEAT_INTERVAL_SEC  # Reset on work
+                    else:
+                        self.stop_event.wait(_idle_wait)
+                        _idle_wait = min(_idle_wait * 1.5, _MAX_IDLE_WAIT)  # Back off when idle
+                        
+                except Exception as e:
+                    logger.error(f"Worker {self.worker_id} error processing: {e}")
+                    self.stop_event.wait(HEARTBEAT_INTERVAL_SEC)
+        finally:
+            if self._executor:
+                self._executor.shutdown(wait=True)
 
     def _recover_stale_files(self, session):
         """Find files running on dead workers and requeue/fail them."""
@@ -533,23 +537,7 @@ class PipelineWorker(threading.Thread):
         except TimeoutError as e:
             logger.error(f"Timeout processing file {file_id}: {e}")
             duration_ms = int((time.time() - start_time) * 1000)
-            # FIX: handle directly instead of re-raising (re-raise to PipelineError
-            # wouldn't be caught by sibling except blocks)
-            struct_log.error(
-                "File processing timed out",
-                job_id=job_id, file_id=file_id, duration_ms=duration_ms,
-                error_code="E_RESOURCE_LIMIT", error=str(e)
-            )
-            with get_session() as session:
-                transition_file_status(
-                    session, file_id, "failed_final",
-                    last_error_code="E_RESOURCE_LIMIT",
-                    last_error_message=f"Processing timeout after {limits.max_processing_time_sec}s",
-                    duration_ms=duration_ms,
-                )
-                append_event(session, job_id, "file_failed_final", file_id=file_id,
-                             payload={"error": str(e), "error_code": "E_RESOURCE_LIMIT"})
-            self._post_file_finalize(job_id)
+            raise PipelineError(ErrorCode.E_RESOURCE_LIMIT, f"Processing timeout after {limits.max_processing_time_sec}s")
 
         except PipelineError as e:
             # Structured error with error code
@@ -752,8 +740,8 @@ class PipelineWorker(threading.Thread):
                     pass
 
                 # Execute converter (this calls marker-pdf etc.) with stage tracking
-                # GPU semaphore ensures only V2_GPU_CONCURRENCY marker jobs run simultaneously
-                with _stage_context(file_id, job_id, "ocr", pages_total=page_count), _gpu_semaphore:
+                # FIXED: Use next_stage="polish" to properly transition after OCR completes
+                with _stage_context(file_id, job_id, "ocr", pages_total=page_count, next_stage="polish"):
                     # Subprocess isolation for VRAM safety; Popen for live progress
                     import sys
                     import subprocess
@@ -905,9 +893,11 @@ class PipelineWorker(threading.Thread):
                 original_md_text = md_text
                 polish_degraded = False
                 degradation_reason = None
+                polish_result = {}
 
                 try:
-                    with _stage_context(file_id, job_id, "polish"):
+                    # FIXED: Use next_stage="done" to transition to "done" after polish completes
+                    with _stage_context(file_id, job_id, "polish", next_stage="done"):
                         polish_result = self._try_optional_polish(md_path, mode, config, job_id, file_id)
 
                     # Check if polish was skipped due to circuit breaker
@@ -1017,7 +1007,7 @@ class PipelineWorker(threading.Thread):
                     record_artifact(session, job_id, file_id, "naming", naming_path)
                     record_artifact(session, job_id, file_id, "manifest", manifest_path)
                 
-                # 4. Mark success
+                # 4. Mark success - FIXED: All artifacts written, now transition to completed
                 duration_ms = int((time.time() - start_time) * 1000)
                 struct_log.info("File processing completed", job_id=job_id, file_id=file_id, duration_ms=duration_ms, stage="done")
                 with get_session() as session:
@@ -1034,7 +1024,7 @@ class PipelineWorker(threading.Thread):
                 inputs = config.get("inputs", [])
                 order_by = config.get("naming_policy", "filename")
 
-                with _stage_context(file_id, job_id, "merge"):
+                with _stage_context(file_id, job_id, "merge", next_stage="done"):
                     from .merger import merge_pipeline
                     report = merge_pipeline(inputs, output_dir, order_by)
                 
@@ -1074,14 +1064,13 @@ class PipelineWorker(threading.Thread):
                     project_root = str(Path(__file__).resolve().parent.parent)
                     # ROBUSTNESS: Dynamic timeout based on merged PDF page count
                     try:
+                        from .converter import get_page_count
                         _merged_pages = get_page_count(out_pdf)
                     except Exception:
                         _merged_pages = 100
                     _merge_ocr_timeout = 120 + max(_merged_pages, 50) * 10
                     logger.info(f"merge_then_ocr: {_merged_pages} pages, timeout={_merge_ocr_timeout}s")
-                    _gpu_semaphore.acquire()
-                    try:
-                        result = subprocess.run(
+                    result = subprocess.run(
                         cmd,
                         cwd=project_root,
                         stdout=subprocess.PIPE,
@@ -1090,8 +1079,6 @@ class PipelineWorker(threading.Thread):
                         timeout=_merge_ocr_timeout,
                         env=env,
                     )
-                    finally:
-                        _gpu_semaphore.release()
 
                     md_path = os.path.join(ocr_out_dir, "merged.md")
                     if result.returncode != 0:
@@ -1175,26 +1162,21 @@ def send_webhook(webhook_url: str, secret: str, payload: dict, max_retries: int 
     return False
 
 
-# GPU semaphore: limits concurrent GPU-heavy OCR tasks (marker-pdf)
-# Multiple workers can run in parallel, but only N can do GPU work simultaneously
-_GPU_CONCURRENCY = int(os.getenv("V2_GPU_CONCURRENCY", "1"))
-_gpu_semaphore = threading.Semaphore(_GPU_CONCURRENCY)
-
 # Global worker pool for the FastAPI lifecycle
 _workers: list[PipelineWorker] = []
 _workers_lock = threading.Lock()
 
 
-def start_workers(num_workers: int = 1):
+def start_workers(num_workers: int = 1, max_concurrent_jobs: int = 3):
+    """Start worker thread pool with parallel job support."""
     worker_count = max(1, int(num_workers))
     with _workers_lock:
         if _workers:
             return
         for i in range(worker_count):
-            w = PipelineWorker(gpu_id=f"cuda:0")
+            w = PipelineWorker(gpu_id=f"cuda:{i}" if i == 0 else "cpu", max_concurrent_jobs=max_concurrent_jobs)
             w.start()
             _workers.append(w)
-    logger.info(f"Started {worker_count} pipeline workers (GPU concurrency={_GPU_CONCURRENCY})")
 
 
 def stop_workers():

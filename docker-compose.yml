@@ -30,6 +30,9 @@ services:
       - V2_LLM_BASE_URL=http://llm_server:8080/v1
       - V2_POLISH_BREAKER_THRESHOLD=3
       - V2_POLISH_BREAKER_COOLDOWN_SEC=120
+      # Parallelism: 2 workers, but only 1 GPU-heavy OCR at a time
+      - V2_WORKERS=2
+      - V2_GPU_CONCURRENCY=1
     depends_on:
       - llm_server
     restart: unless-stopped

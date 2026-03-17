@@ -303,14 +303,18 @@ def get_job_status(job_id: str):
         files_total = len(files)
         files_done = sum(1 for f in files if f.status == "completed")
 
-        # Calculate overall progress from pages
-        total_pages = sum(f.pages_total or 0 for f in files if f.pages_total)
-        done_pages = sum(f.pages_done or 0 for f in files if f.pages_done)
-
-        if total_pages > 0:
-            overall_progress_pct = int((done_pages / total_pages) * 100)
-        elif files_total > 0:
-            overall_progress_pct = int((files_done / files_total) * 100)
+        # Calculate overall progress: prefer stage_progress_pct (time-based),
+        # fallback to pages_done/pages_total, then files_done/files_total
+        if files_total > 0:
+            # Weighted average of per-file stage_progress_pct
+            progress_sum = 0
+            for f in files:
+                if f.status == "completed":
+                    progress_sum += 100
+                elif f.stage_progress_pct is not None:
+                    progress_sum += f.stage_progress_pct
+                # queued/failed files contribute 0
+            overall_progress_pct = int(progress_sum / files_total)
         else:
             overall_progress_pct = 0
 
