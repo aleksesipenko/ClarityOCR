@@ -733,7 +733,8 @@ class PipelineWorker(threading.Thread):
                     # --- Live progress tracking via Popen ---
                     EST_SECONDS_PER_PAGE = 4
                     PROGRESS_INTERVAL = 5  # seconds between DB updates
-                    TIMEOUT_SEC = 600
+                    # Dynamic timeout: 120s base + 10s per page (quality preset is slow)
+                    TIMEOUT_SEC = 120 + max(page_count or 50, 50) * 10
 
                     try:
                         proc = subprocess.Popen(
