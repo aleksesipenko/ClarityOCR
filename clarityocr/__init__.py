@@ -7,7 +7,7 @@ Features:
 - LLM post-processing for error correction (LM Studio compatible)
 - Real-time Web UI with progress tracking
 - Optimized for NVIDIA RTX GPUs (16GB VRAM)
-- Apple Silicon (MPS) support with fallback mode
+- CPU fallback mode for local debugging
 """
 
 __version__ = "1.0.0"

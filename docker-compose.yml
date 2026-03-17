@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   clarityocr:
     build: .
@@ -17,13 +15,48 @@ services:
               count: 1
               capabilities: [gpu]
     volumes:
-      # Mount inputs/outputs to host for easy access
+      # Mount inputs and v2 outputs to host for easy access
       - ./inputs:/app/inputs
-      - ./output:/app/output
-      # Persistent cache for models (~15GB)
+      - ./output_v2:/app/output_v2
+      # Persistent models cache (~15GB)
       - clarityocr_models:/root/.cache/huggingface
-      # Persistent logs
-      - clarityocr_logs:/root/.clarityocr/logs
+      # Persistent app data (DB, logs)
+      - clarityocr_data:/root/.clarityocr
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CLARITY_HOST=0.0.0.0
+      - CLARITY_PORT=8008
+      - DB_PATH=/app/output_v2/clarityocr_v2.sqlite
+      # Uploads default to ~/.clarityocr/uploads (clarityocr_data volume).
+      # Do NOT point at ./inputs bind-mount — it may have a small partition.
+      # - V2_UPLOAD_ROOT=/root/.clarityocr/uploads
+      - V2_LLM_BASE_URL=http://vllm_server:8000/v1
+      - V2_POLISH_BREAKER_THRESHOLD=3
+      - V2_POLISH_BREAKER_COOLDOWN_SEC=120
+    restart: unless-stopped
+
+  vllm_server:
+    image: vllm/vllm-openai:latest
+    container_name: clarityocr_vllm
+    command: >
+      --model Qwen/Qwen2.5-0.5B-Instruct
+      --host 0.0.0.0
+      --port 8000
+      --gpu-memory-utilization 0.3
+      --max-model-len 4096
+      --enforce-eager
+    ports:
+      - "8000:8000"
+    gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - NVIDIA_VISIBLE_DEVICES=all
@@ -33,5 +66,5 @@ services:
 volumes:
   clarityocr_models:
     name: clarityocr_models
-  clarityocr_logs:
-    name: clarityocr_logs
+  clarityocr_data:
+    name: clarityocr_data

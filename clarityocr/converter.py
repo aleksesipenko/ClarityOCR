@@ -34,6 +34,18 @@ import shutil
 
 warnings.filterwarnings("ignore")
 
+# Import structured logger (lazy to avoid circular imports)
+_struct_log = None
+def _get_struct_log():
+    global _struct_log
+    if _struct_log is None:
+        try:
+            from .structured_logger import get_logger
+            _struct_log = get_logger("converter")
+        except Exception:
+            _struct_log = None
+    return _struct_log
+
 # =============================================================================
 # DEVICE UTILITIES
 # =============================================================================
@@ -257,16 +269,6 @@ def get_gpu_stats() -> Dict[str, Any]:
             except Exception:
                 pass
 
-    # MPS path: use system memory (unified memory)
-    if device_type == "mps":
-        mem = get_memory_info()
-        return {
-            "gpu_util": -1,  # MPS doesn't expose utilization
-            "vram_used": round(mem["used"], 2),
-            "vram_total": round(mem["total"], 2),
-            "gpu_temp": -1,
-        }
-
     # CPU fallback
     return {"gpu_util": 0, "vram_used": 0, "vram_total": 0, "gpu_temp": 0}
 
@@ -445,9 +447,6 @@ def device_health_check() -> bool:
         t = torch.zeros(1, device=device)
         if device == "cuda":
             torch.cuda.synchronize()
-        elif device == "mps":
-            # MPS doesn't have explicit sync like CUDA
-            pass
         del t
         return True
     except Exception as e:
@@ -465,10 +464,11 @@ def device_full_cleanup() -> None:
         device = get_device_type()
         if device == "cuda":
             import torch
+
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
-        elif device == "mps":
+        else:
             cleanup_device()
     except Exception:
         pass
@@ -559,17 +559,12 @@ def _conversion_worker(
         from marker.models import create_model_dict
         from marker.output import text_from_rendered
 
-        # Configure CUDA in worker
+        # Configure GPU in worker
         if is_gpu_available():
             device = get_device_type()
             if device == "cuda":
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cuda.matmul.allow_tf32 = True
-            elif device == "mps":
-                try:
-                    torch.backends.mps.allow_tf32 = True
-                except AttributeError:
-                    pass
 
         # Load models in this process
         models = create_model_dict()
@@ -583,9 +578,6 @@ def _conversion_worker(
         device = get_torch_device()
         if device == "cuda":
             torch.cuda.synchronize()
-        elif device == "mps":
-            # MPS doesn't have explicit sync like CUDA
-            pass
 
         text, metadata, images = text_from_rendered(rendered)
 
@@ -756,12 +748,6 @@ def warmup_device() -> None:
         if device == "cuda":
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-        elif device == "mps":
-            try:
-                if hasattr(torch.mps, "empty_cache"):
-                    torch.mps.empty_cache()
-            except Exception:
-                pass
     except Exception as e:
         device_type = get_device_type()
         print(f"  [{device_type}] Warmup warning: {e}")
@@ -1286,6 +1272,11 @@ def main():
         log_info(f"PDF [{idx}/{len(pdf_info)}] {pdf_name}")
         log_debug(f"  Expected pages: {expected_pages}, Timeout: {timeout_str}")
 
+        # Structured logging
+        slog = _get_struct_log()
+        if slog:
+            slog.info("PDF conversion started", file_name=pdf_name, expected_pages=expected_pages, timeout_s=timeout_s)
+
         with _print_lock:
             print(f"\n{'─' * 70}")
             print(f"[{idx}/{len(pdf_info)}] {short_name}")
@@ -1434,6 +1425,10 @@ def main():
                 )
                 log_debug(f"  Speed: {pages_per_min:.1f} p/min, VRAM: {vram:.1f}GB, batch={bs}")
 
+                # Structured logging
+                if slog:
+                    slog.info("PDF conversion completed", file_name=pdf_name, actual_pages=actual_pages, duration_ms=int(pdf_time * 1000), pages_per_min=pages_per_min)
+
                 # Emit OCR text preview for Web UI (first 1000 chars)
                 emit_ocr_preview(pdf_name, text, actual_pages)
 
@@ -1478,6 +1473,8 @@ def main():
             with results_lock:
                 failed += 1
             log_error(f"  FAILED: {last_error}")
+            if slog:
+                slog.error("PDF conversion failed", file_name=pdf_name, error=str(last_error), timed_out=timed_out)
             with _print_lock:
                 if timed_out:
                     print(f"\n✗ TIMEOUT: PDF conversion exceeded time limit")

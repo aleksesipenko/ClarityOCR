@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clarityocr"
 version = "1.0.0"
-description = "High-quality PDF to Markdown conversion with GPU-accelerated OCR and LLM post-processing"
+description = "Server-first V2 OCR pipeline with async job orchestration for VPS/Docker"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
@@ -41,11 +41,16 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "marker-pdf>=0.3.0",
-    "torch>=2.0.0",
+    "torch>=2.7,<2.8",
+    "torchvision>=0.22,<0.23",
+    "transformers>=4.45.2,<4.56.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
+    "python-multipart>=0.0.9",
     "openai>=1.0.0",
     "pypdfium2>=4.0.0",
+    "sqlalchemy>=2.0.0",
+    "httpx>=0.25.0",
 ]
 
 [project.optional-dependencies]

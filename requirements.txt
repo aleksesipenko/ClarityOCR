@@ -4,17 +4,21 @@
 # PDF to Markdown conversion (marker-pdf includes surya-ocr)
 marker-pdf>=0.3.0
 
-# PyTorch (supports CUDA for NVIDIA, MPS for Apple Silicon, CPU fallback)
-# For CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-# For MPS (Apple Silicon): pip install torch (no special install needed)
-torch>=2.0.0
+# PyTorch runtime (CUDA on NVIDIA + CPU fallback)
+# Keep torch/torchvision in a compatible pair required by modern marker-pdf.
+torch>=2.7,<2.8
+torchvision>=0.22,<0.23
 
-# System memory monitoring (used for MPS/Apple Silicon support)
+# Marker/surya are sensitive to transformer API changes; keep a stable band.
+transformers>=4.45.2,<4.56.0
+
+# System memory monitoring (telemetry/helpers)
 psutil>=5.9.0
 
 # Web UI server
 fastapi>=0.100.0
 uvicorn>=0.23.0
+python-multipart>=0.0.9
 
 # LLM post-processing (LM Studio compatible)
 openai>=1.0.0
@@ -22,7 +26,13 @@ openai>=1.0.0
 # PDF utilities
 pypdfium2>=4.0.0
 
+# Database persistence for V2 API
+sqlalchemy>=2.0.0
+
+# HTTP client for webhooks and V2 testing
+httpx>=0.25.0
+
 # Optional: Development dependencies
 # ruff>=0.1.0
-# pytest>=7.0.0
+pytest>=7.0.0
 # mypy>=1.0.0

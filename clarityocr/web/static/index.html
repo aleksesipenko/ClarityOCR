@@ -3,351 +3,212 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>OCR PDF Converter</title>
+    <title>ClarityOCR V2 Console</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/v2-style.css" />
   </head>
   <body>
-    <div class="app">
-      <header class="topbar">
-        <div class="title">
-          <div class="h1">
-            <span class="logo">◉</span>
-            OCR PDF
-          </div>
-          <div class="sub">Convert PDFs to Markdown with page markers</div>
+    <div class="backdrop-grid"></div>
+    <main class="shell">
+      <header class="hero">
+        <div class="hero-main">
+          <h1>ClarityOCR V2</h1>
+          <p>VPS-ready console for Docker deployments</p>
         </div>
-        <div class="topbar-right">
-          <button id="btnSettings" class="btn icon" title="Performance Settings">
-            <span class="settings-icon"></span>
-          </button>
-          <button id="btnTheme" class="btn icon" title="Toggle theme">
-            <span class="theme-icon"></span>
-          </button>
-          <div class="status-wrap">
-            <div class="pill" id="jobStatus">idle</div>
-            <div class="progress-track">
-              <div class="progress-bar" id="progressBar"></div>
-            </div>
-          </div>
+        <div class="hero-status">
+          <div class="badge" id="readyBadge">checking</div>
+          <div class="badge secondary" id="jobBadge">no active job</div>
         </div>
       </header>
 
-      <section class="card">
-        <div class="row">
-          <label class="label">Folder</label>
-          <input id="folderPath" class="input" type="text" spellcheck="false" placeholder="Select a folder..." />
-          <button id="btnBrowse" class="btn">Browse</button>
-          <div class="inline-control">
-            <label class="label-sm">Max pages</label>
-            <input id="maxPages" class="input-sm" type="number" value="500" min="10" max="5000" step="10" />
+      <!-- 2.3: Queue Overview -->
+      <section class="card reveal" id="queueSection">
+        <div class="card-title-row">
+          <h2>Queue Overview</h2>
+          <div class="queue-meta">
+            <span id="queueLastUpdated" class="inline-note">-</span>
+            <button class="btn ghost" id="btnReloadQueue">Reload</button>
           </div>
-          <button id="btnScan" class="btn primary">Refresh</button>
         </div>
-        <div class="row row-actions">
-          <button id="btnSelectAll" class="btn">Select all</button>
-          <button id="btnSelectNone" class="btn">Select none</button>
-          <button id="btnSelectNew" class="btn">Select pending</button>
-          <div class="spacer"></div>
-          <div class="stats" id="stats"></div>
-          <div class="inline-control">
-            <label class="label-sm">Parallel</label>
-            <input id="parallelCount" class="input-sm" type="number" value="1" min="1" max="8" />
-          </div>
-          <div class="inline-control">
-            <label class="label-sm">Preset</label>
-            <select id="ocrPreset" class="input-sm" style="width: 100px;">
-              <option value="speed">Speed</option>
-              <option value="balanced" selected>Balanced</option>
-              <option value="quality">Quality</option>
-            </select>
-          </div>
-          <button id="btnRun" class="btn primary">Run OCR</button>
-          <button id="btnStop" class="btn danger" disabled>Stop</button>
+        <div id="queueStats" class="queue-stats">
+          <span class="queue-stat" id="statRunning">running: –</span>
+          <span class="queue-stat" id="statQueued">queued: –</span>
+          <span class="queue-stat" id="statCompleted">completed: –</span>
+          <span class="queue-stat" id="statFailed">failed: –</span>
+          <span class="queue-stat" id="statCanceled">canceled: –</span>
         </div>
-        <!-- Post-processing row -->
-        <div class="row row-actions postprocess-row">
-          <span class="label">Post-processing:</span>
-          <button id="btnFixMojibake" class="btn" title="Fix encoding issues in converted files">Fix Mojibake</button>
-          <a href="/llm-polish" class="btn primary" title="Open LLM Polish page with full progress tracking">LLM Polish →</a>
-          <span class="llm-status" id="llmStatus"></span>
-        </div>
-
-        <!-- Pipeline Settings -->
-        <details class="pipeline-settings" open>
-          <summary class="settings-toggle">
-            <span class="settings-icon-inline">⚙</span> Pipeline Settings
-            <span class="toggle-arrow">▼</span>
-          </summary>
-          
-          <div class="settings-content">
-            <!-- Output Directory Row -->
-            <div class="row settings-row">
-              <label class="label">Output folder</label>
-              <input id="outputPath" class="input" type="text" spellcheck="false" placeholder="Select output folder for MD files..." />
-              <button id="btnBrowseOutput" class="btn">Browse</button>
-            </div>
-            
-            <!-- LLM Auto-Polish Row -->
-            <div class="row settings-row llm-row">
-              <label class="label">LLM Polish</label>
-              <div class="llm-options">
-                <label class="radio-label">
-                  <input type="radio" name="llmMode" value="disabled" checked> Disabled
-                </label>
-                <label class="radio-label">
-                  <input type="radio" name="llmMode" value="after_each"> After each file
-                </label>
-                <label class="radio-label">
-                  <input type="radio" name="llmMode" value="after_all"> After all files
-                </label>
-              </div>
-              <div class="llm-status-indicator" id="llmStatusIndicator">
-                <span class="status-dot"></span>
-                <span class="status-text" id="llmStatusText">Checking...</span>
-              </div>
-            </div>
-
-            <!-- After OCR Action -->
-            <div class="row settings-row">
-              <label class="label">After OCR</label>
-              <div class="llm-options">
-                <label class="radio-label">
-                  <input type="radio" name="afterOcr" value="llm" checked> Open LLM view
-                </label>
-                <label class="radio-label">
-                  <input type="radio" name="afterOcr" value="stay"> Stay here
-                </label>
-              </div>
-            </div>
-          </div>
-        </details>
+        <div id="activeJobsList" class="active-jobs-list"></div>
       </section>
 
-      <section class="card">
-        <div class="tableWrap">
-          <table class="table" id="pdfTable">
-            <thead>
-              <tr>
-                <th class="colCheck">
-                  <input type="checkbox" id="checkAll" title="Toggle all" />
-                </th>
-                <th class="sortable" data-col="name">File <span class="sort-icon"></span></th>
-                <th class="sortable colPages" data-col="pages">Pages <span class="sort-icon"></span></th>
-                <th class="sortable colStatus" data-col="status">Status <span class="sort-icon"></span></th>
-              </tr>
-            </thead>
-            <tbody id="pdfTbody"></tbody>
-          </table>
+      <section class="card reveal">
+        <div class="card-title-row">
+          <h2>Connection</h2>
+          <button class="btn ghost" id="btnSaveApiBase">Save</button>
         </div>
-        <div class="table-footer" id="tableFooter"></div>
+        <div class="field-grid">
+          <label class="field">
+            <span>API Base</span>
+            <input id="apiBase" type="text" placeholder="Leave empty for same-origin (recommended)" />
+          </label>
+          <label class="field">
+            <span>Client ID</span>
+            <input id="clientId" type="text" placeholder="vps-console" />
+          </label>
+          <div class="field compact">
+            <span>Health</span>
+            <div id="healthText" class="mono">-</div>
+          </div>
+        </div>
       </section>
 
-      <section class="card">
-        <div class="logHead">
-          <div class="label">Live log</div>
-          <div class="log-controls">
-            <label class="checkbox-label">
-              <input type="checkbox" id="autoScroll" checked />
-              Auto-scroll
+      <section class="grid two-col">
+        <article class="card reveal">
+          <div class="card-title-row">
+            <h2>Input Upload</h2>
+            <button class="btn" id="btnUpload">Upload to Server</button>
+          </div>
+          <p class="hint">Upload PDFs/images directly to the Docker container. No local server paths needed.</p>
+          <input id="fileInput" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.zip" />
+          <div id="selectedCount" class="inline-note">No files selected</div>
+          <ul id="selectedList" class="simple-list"></ul>
+          <div class="inline-note mono" id="uploadInfo">Upload batch: -</div>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-title-row">
+            <h2>Job Settings</h2>
+            <button class="btn primary" id="btnStart">Start V2 Job</button>
+          </div>
+          <div class="field-grid">
+            <label class="field">
+              <span>Mode</span>
+              <select id="mode">
+                <option value="ocr_plus_metadata" selected>ocr_plus_metadata</option>
+                <option value="ocr_only">ocr_only</option>
+                <option value="ocr_plus_polish">ocr_plus_polish</option>
+                <option value="merge_only">merge_only</option>
+                <option value="merge_then_ocr">merge_then_ocr</option>
+              </select>
             </label>
-            <button id="btnClearLog" class="btn btn-sm">Clear</button>
+            <label class="field">
+              <span>Preset</span>
+              <select id="preset">
+                <option value="speed">speed</option>
+                <option value="balanced" selected>balanced</option>
+                <option value="quality">quality</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Naming Policy</span>
+              <select id="namingPolicy">
+                <option value="on" selected>on</option>
+                <option value="deterministic_only">deterministic_only</option>
+                <option value="off">off</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Polish</span>
+              <select id="polish">
+                <option value="off" selected>off</option>
+                <option value="auto">auto</option>
+                <option value="on">on</option>
+              </select>
+            </label>
           </div>
-        </div>
-        <pre class="log" id="log"></pre>
-        
-        <!-- GPU Monitoring Panel (visible during job) -->
-        <div class="gpu-monitor" id="gpuMonitor">
-          <div class="monitor-row">
-            <div class="monitor-item">
-              <span class="monitor-label">GPU</span>
-              <div class="monitor-bar-track">
-                <div class="monitor-bar gpu-bar" id="monitorGpuBar"></div>
-              </div>
-              <span class="monitor-value" id="monitorGpuUtil">--%</span>
-            </div>
-            <div class="monitor-item">
-              <span class="monitor-label">VRAM</span>
-              <div class="monitor-bar-track">
-                <div class="monitor-bar vram-bar" id="monitorVramBar"></div>
-              </div>
-              <span class="monitor-value" id="monitorVramText">--/-- GB</span>
-            </div>
-            <div class="monitor-item">
-              <span class="monitor-label">Temp</span>
-              <span class="monitor-value temp" id="monitorTemp">--°C</span>
-            </div>
-            <div class="monitor-item">
-              <span class="monitor-label">Speed</span>
-              <span class="monitor-value speed" id="monitorSpeed">-- p/min</span>
-            </div>
-            <div class="monitor-item">
-              <span class="monitor-label">Batch</span>
-              <span class="monitor-value" id="monitorBatch">--</span>
-            </div>
-            <div class="monitor-item">
-              <span class="monitor-label">ETA</span>
-              <span class="monitor-value eta" id="monitorEta">--:--</span>
-            </div>
+          <div class="actions">
+            <button class="btn danger" id="btnCancel" disabled>Cancel Job</button>
+            <button class="btn" id="btnRetry" disabled>Retry Failed</button>
+            <button class="btn" id="btnRefreshNow">Refresh</button>
           </div>
-        </div>
-        
-        <!-- OCR Text Preview (visible during/after OCR) -->
-        <div class="ocr-preview-panel" id="ocrPreviewPanel" hidden>
-          <div class="preview-header">
-            <span class="preview-title">OCR Output Preview</span>
-            <span class="preview-info" id="ocrPreviewInfo">-</span>
-          </div>
-          <div class="preview-content">
-            <pre class="preview-text" id="ocrPreviewText">Waiting for OCR output...</pre>
-          </div>
-        </div>
+          <div class="inline-note mono">Current Job: <span id="currentJob">-</span></div>
+        </article>
       </section>
 
-      <footer class="footer">
-        <span>OCR Web UI</span>
-        <span class="sep">•</span>
-        <span>marker + pypdfium2</span>
-      </footer>
-    </div>
-
-    <!-- Browse Modal -->
-    <div class="modal" id="modal" hidden>
-      <div class="modal-backdrop"></div>
-      <div class="modalCard">
-        <div class="modalHead">
-          <div class="h2">Browse folders</div>
-          <div class="row">
-            <button id="btnUseFolder" class="btn primary">Use this folder</button>
-            <button id="btnCloseModal" class="btn">Cancel</button>
+      <!-- 2.1: Current Job Progress Dashboard -->
+      <section class="card reveal" id="progressSection" style="display:none">
+        <div class="card-title-row">
+          <h2>Job Progress</h2>
+          <div class="progress-meta">
+            <span id="progressJobId" class="mono inline-note"></span>
+            <span id="progressEta" class="inline-note"></span>
           </div>
         </div>
-        <div class="modalBody">
-          <div class="breadcrumbs" id="breadcrumbs"></div>
-          <div class="row">
-            <input id="browsePath" class="input" type="text" spellcheck="false" placeholder="Enter path..." />
-            <button id="btnUp" class="btn">↑ Up</button>
-            <button id="btnGo" class="btn primary">Go</button>
+        <div class="progress-overall-wrap">
+          <div class="progress-label-row">
+            <span id="progressLabel" class="progress-label">0%</span>
+            <span id="progressFilesLabel" class="progress-files-label">0 / 0 files</span>
           </div>
-          <div class="browse-error" id="browseError"></div>
-          <div class="browseList" id="browseList"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Export Modal -->
-    <div class="modal" id="exportModal" hidden>
-      <div class="modal-backdrop"></div>
-      <div class="modalCard export-modal">
-        <div class="modalHead">
-          <div class="h2">Export Document</div>
-          <div class="row">
-            <button id="btnCloseExport" class="btn">Cancel</button>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" id="progressBarFill" style="width:0%"></div>
           </div>
         </div>
-        <div class="modalBody">
-          <div class="row settings-row">
-            <label class="label">Format</label>
-            <select id="exportFormat" class="input">
-              <option value="docx">Microsoft Word (.docx)</option>
-              <option value="html">HTML Web Page (.html)</option>
-            </select>
-          </div>
-          <div class="row settings-row" id="refDocRow">
-            <label class="label">Style Doc</label>
-            <input id="refDocPath" class="input" type="text" placeholder="Path to reference.docx (optional)" />
-          </div>
-          <div class="row row-actions">
-            <div class="spacer"></div>
-            <button id="btnDoExport" class="btn primary">Export Now</button>
-          </div>
-          <div id="exportStatus" class="postprocess-status hidden"></div>
-        </div>
-      </div>
-    </div>
+        <!-- Stage timeline per file -->
+        <div id="stageTimeline" class="stage-timeline"></div>
+      </section>
 
-    <!-- Performance Settings Modal -->
-    <div class="modal" id="settingsModal" hidden>
-      <div class="modal-backdrop"></div>
-      <div class="modalCard settings-modal">
-        <div class="modalHead">
-          <div class="h2">Performance Info</div>
-          <div class="row">
-            <button id="btnCloseSettings" class="btn primary">Close</button>
+      <section class="grid two-col">
+        <article class="card reveal">
+          <div class="card-title-row">
+            <h2>Recent Jobs</h2>
+            <button class="btn ghost" id="btnReloadJobs">Reload</button>
           </div>
-        </div>
-        <div class="modalBody">
-          <!-- GPU Info -->
-          <div class="gpu-info" id="gpuInfo">
-            <span class="gpu-name" id="gpuName">--</span>
-            <div class="vram-display">
-              <span class="vram-label">VRAM</span>
-              <div class="vram-bar-track">
-                <div class="vram-bar" id="vramBar"></div>
-              </div>
-              <span class="vram-text" id="vramText">--/-- GB</span>
-            </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Job</th>
+                  <th>Status</th>
+                  <th>Mode</th>
+                  <th>Progress</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="jobsTbody"></tbody>
+            </table>
           </div>
+        </article>
 
-          <!-- Fixed Configuration Info -->
-          <div class="settings-section">
-            <div class="section-title">Fixed Reliable Configuration</div>
-            <div class="config-info">
-              <p>Using optimized batch sizes that always work without OOM:</p>
-              <ul class="config-list">
-                <li><strong>Layout batch:</strong> 4</li>
-                <li><strong>Recognition batch:</strong> 8</li>
-                <li><strong>Detection batch:</strong> 8</li>
-              </ul>
-              <p class="config-note">These settings provide stable performance on RTX 4070 Ti SUPER (16GB) for PDFs of any size.</p>
-            </div>
+        <article class="card reveal">
+          <div class="card-title-row">
+            <h2>Job Files</h2>
+            <div id="filesSummary" class="inline-note">-</div>
           </div>
-
-          <!-- OOM Behavior -->
-          <div class="settings-section">
-            <div class="section-title">OOM Recovery</div>
-            <label class="checkbox-label">
-              <input type="checkbox" id="autoFallback" checked>
-              Auto-reduce batch size on OOM (recommended)
-            </label>
-            <div class="oom-hint">If CUDA runs out of memory, automatically retry with smaller batch sizes.</div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Input</th>
+                  <th>Stage</th>
+                  <th>Status</th>
+                  <th>Attempt</th>
+                  <th>Error</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="filesTbody"></tbody>
+            </table>
           </div>
-        </div>
-      </div>
-    </div>
+        </article>
+      </section>
 
-    <!-- Toast container -->
-    <div class="toast-container" id="toastContainer"></div>
-
-    <!-- Transition overlay -->
-    <div class="transition-overlay" id="transitionOverlay">
-      <div class="transition-content">
-        <div class="logo">◉</div>
-        <div class="message" id="transitionMessage">Switching to LLM…</div>
-      </div>
-    </div>
-
-    <!-- Post-processing Modal -->
-    <div class="modal" id="postprocessModal" hidden>
-      <div class="modal-backdrop"></div>
-      <div class="modalCard postprocess-modal">
-        <div class="modalHead">
-          <div class="h2" id="postprocessTitle">Post-processing</div>
-          <div class="row">
-            <button id="btnClosePostprocess" class="btn">Close</button>
+      <section class="grid two-col">
+        <article class="card reveal">
+          <div class="card-title-row">
+            <h2>Artifacts</h2>
+            <div class="inline-note">download ready outputs</div>
           </div>
-        </div>
-        <div class="modalBody">
-          <div class="postprocess-status" id="postprocessStatus">
-            <div class="spinner"></div>
-            <span>Processing...</span>
+          <ul id="artifactsList" class="simple-list"></ul>
+        </article>
+        <article class="card reveal">
+          <div class="card-title-row">
+            <h2>Events</h2>
+            <div class="inline-note">latest pipeline trace</div>
           </div>
-          <pre class="postprocess-output" id="postprocessOutput"></pre>
-        </div>
-      </div>
-    </div>
+          <pre id="eventsLog" class="mono log"></pre>
+        </article>
+      </section>
+    </main>
 
-    <script src="/static/state-manager.js"></script>
-    <script src="/static/app.js"></script>
+    <script src="/static/v2-app.js"></script>
   </body>
 </html>

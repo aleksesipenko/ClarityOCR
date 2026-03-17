@@ -1,0 +1,47 @@
+##############################################################################
+# docker-compose.local.yml — ClarityOCR local development / canary override
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up
+#
+# This file overrides vLLM model for canary evaluation.
+# To activate Qwen2.5-3B canary:
+#   V2_LLM_MODEL_CANARY=Qwen/Qwen2.5-3B-Instruct V2_CANARY_PCT=20 \
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up
+##############################################################################
+services:
+  clarityocr:
+    environment:
+      # Canary routing (empty = disabled)
+      - V2_LLM_MODEL_PRIMARY=Qwen/Qwen2.5-0.5B-Instruct
+      - V2_LLM_MODEL_CANARY=${V2_LLM_MODEL_CANARY:-}
+      - V2_CANARY_PCT=${V2_CANARY_PCT:-10}
+
+  # Override vLLM to serve target canary model (Qwen2.5-3B) locally
+  # Uncomment and set model name to switch:
+  vllm_canary:
+    image: vllm/vllm-openai:latest
+    container_name: clarityocr_vllm_canary
+    profiles:
+      - canary
+    command: >
+      --model ${CANARY_VLLM_MODEL:-Qwen/Qwen2.5-3B-Instruct}
+      --host 0.0.0.0
+      --port 8001
+      --gpu-memory-utilization 0.4
+      --max-model-len 4096
+      --enforce-eager
+    ports:
+      - "8001:8001"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    restart: unless-stopped
