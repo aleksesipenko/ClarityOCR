@@ -5,7 +5,6 @@ services:
     container_name: clarityocr
     ports:
       - "8008:8008"
-    # docker compose v2 GPU passthrough
     gpus: all
     deploy:
       resources:
@@ -15,12 +14,9 @@ services:
               count: 1
               capabilities: [gpu]
     volumes:
-      # Mount inputs and v2 outputs to host for easy access
       - ./inputs:/app/inputs
       - ./output_v2:/app/output_v2
-      # Persistent models cache (~15GB)
       - clarityocr_models:/root/.cache/huggingface
-      # Persistent app data (DB, logs)
       - clarityocr_data:/root/.clarityocr
     environment:
       - CUDA_VISIBLE_DEVICES=0
@@ -31,24 +27,25 @@ services:
       - DB_PATH=/app/output_v2/clarityocr_v2.sqlite
       # Uploads default to ~/.clarityocr/uploads (clarityocr_data volume).
       # Do NOT point at ./inputs bind-mount — it may have a small partition.
-      # - V2_UPLOAD_ROOT=/root/.clarityocr/uploads
-      - V2_LLM_BASE_URL=http://vllm_server:8000/v1
+      - V2_LLM_BASE_URL=http://llm_server:8080/v1
       - V2_POLISH_BREAKER_THRESHOLD=3
       - V2_POLISH_BREAKER_COOLDOWN_SEC=120
+    depends_on:
+      - llm_server
     restart: unless-stopped
 
-  vllm_server:
-    image: vllm/vllm-openai:latest
-    container_name: clarityocr_vllm
+  llm_server:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: clarityocr_llm
     command: >
-      --model Qwen/Qwen2.5-0.5B-Instruct
+      -m /models/qwen3.5-4b-q6_k.gguf
       --host 0.0.0.0
-      --port 8000
-      --gpu-memory-utilization 0.3
-      --max-model-len 4096
-      --enforce-eager
+      --port 8080
+      -ngl 99
+      -c 4096
+      --chat-template chatml
     ports:
-      - "8000:8000"
+      - "8000:8080"
     gpus: all
     deploy:
       resources:
@@ -57,6 +54,10 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    volumes:
+      # Mount GGUF models directory from host
+      # Place .gguf files in ./models/ or set LLM_MODELS_DIR
+      - ${LLM_MODELS_DIR:-./models}:/models:ro
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - NVIDIA_VISIBLE_DEVICES=all
