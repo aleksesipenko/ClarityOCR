@@ -29,7 +29,9 @@ services:
       - CLARITY_HOST=0.0.0.0
       - CLARITY_PORT=8008
       - DB_PATH=/app/output_v2/clarityocr_v2.sqlite
-      - V2_UPLOAD_ROOT=/app/inputs/uploads
+      # Uploads default to ~/.clarityocr/uploads (clarityocr_data volume).
+      # Do NOT point at ./inputs bind-mount — it may have a small partition.
+      # - V2_UPLOAD_ROOT=/root/.clarityocr/uploads
       - V2_LLM_BASE_URL=http://vllm_server:8000/v1
       - V2_POLISH_BREAKER_THRESHOLD=3
       - V2_POLISH_BREAKER_COOLDOWN_SEC=120
