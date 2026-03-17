@@ -158,10 +158,22 @@ def setup_db(db_path: str = None):
     db_engine = init_db(resolved_db_path)
     SessionLocal = get_session_maker(db_engine)
 
+from contextlib import contextmanager as _contextmanager
+
+@_contextmanager
 def get_session():
+    """Proper context manager: auto-commit on success, rollback on error, always close."""
     if SessionLocal is None:
         raise RuntimeError("Database not initialized. Call setup_db() first.")
-    return SessionLocal()
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def close_db():

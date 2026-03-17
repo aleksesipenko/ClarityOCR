@@ -34,10 +34,9 @@ def get_cors_origins() -> list[str]:
     raw = os.getenv("CORS_ORIGINS", "").strip()
     if raw:
         return [item.strip() for item in raw.split(",") if item.strip()]
-    return [
-        "http://127.0.0.1:8008",
-        "http://localhost:8008",
-    ]
+    # Default: allow all origins for easier Docker/VPS deployment
+    # Set CORS_ORIGINS env var to restrict in production
+    return ["*"]
 
 
 def get_worker_count() -> int:
@@ -56,7 +55,8 @@ def get_current_user(credentials: Optional[HTTPBasicCredentials] = Depends(secur
     if not api_user or not api_pass:
         return "anonymous"
 
-    if credentials is None or credentials.username != api_user or credentials.password != api_pass:
+    import hmac as _hmac
+    if credentials is None or not _hmac.compare_digest(credentials.username, api_user) or not _hmac.compare_digest(credentials.password, api_pass):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -90,6 +90,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ROBUSTNESS: Health/liveness endpoints without auth for monitoring/Docker HEALTHCHECK
+from fastapi import APIRouter as _HealthRouter
+_health_router = _HealthRouter()
+
+@_health_router.get("/api/v2/health/live", summary="Liveness (no auth)")
+def _liveness_noauth():
+    return {"status": "alive"}
+
+@_health_router.get("/api/v2/health/ready", summary="Readiness (no auth)")
+def _readiness_noauth():
+    from clarityocr.api_v2 import _probe_ocr_core, _probe_db, _probe_llm
+    return {"ocr_core": _probe_ocr_core(), "db": _probe_db(), "llm": _probe_llm()}
+
+app.include_router(_health_router)  # No auth
 app.include_router(api_v2_router, prefix="/api/v2", dependencies=[Depends(get_current_user)])
 
 _static_path = static_dir()

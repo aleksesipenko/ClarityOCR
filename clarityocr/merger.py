@@ -120,8 +120,12 @@ def build_merged_pdf(sorted_inputs: List[str], output_pdf_path: str) -> Dict[str
         if ext == ".pdf":
             try:
                 src_pdf = pdfium.PdfDocument(ipath)
-                # Deduplicate based on PDF hash
-                f_hash = hashlib.sha256(open(ipath, 'rb').read()).hexdigest()
+                # Deduplicate based on PDF hash (chunked to avoid OOM on large files)
+                _hasher = hashlib.sha256()
+                with open(ipath, 'rb') as _hf:
+                    for _chunk in iter(lambda: _hf.read(65536), b""):
+                        _hasher.update(_chunk)
+                f_hash = _hasher.hexdigest()
                 if f_hash in seen_hashes:
                     report["warnings"].append({"event": "duplicate_detected", "file": ipath})
                     report["skipped_duplicate"] += 1

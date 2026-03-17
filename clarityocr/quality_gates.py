@@ -9,6 +9,17 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 
+def _env_float(name: str, default: float) -> float:
+    """Safe env var parsing — invalid values fall back to default."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return default
+
+
 @dataclass
 class QualityGate:
     """Quality gate configuration."""
@@ -21,7 +32,7 @@ class QualityGate:
 OCR_GATES = [
     QualityGate(
         name="ocr_confidence",
-        threshold=float(os.getenv("QG_OCR_CONFIDENCE_MIN", "0.7")),
+        threshold=_env_float("QG_OCR_CONFIDENCE_MIN", 0.7),
         failure_mode="warn"
     ),
     QualityGate(
@@ -35,12 +46,12 @@ OCR_GATES = [
 POLISH_GATES = [
     QualityGate(
         name="polish_diff_ratio",
-        threshold=float(os.getenv("QG_POLISH_DIFF_RATIO_MAX", "0.3")),
+        threshold=_env_float("QG_POLISH_DIFF_RATIO_MAX", 0.3),
         failure_mode="warn"
     ),
     QualityGate(
         name="polish_length_ratio",
-        threshold=float(os.getenv("QG_POLISH_LENGTH_RATIO_MAX", "3.0")),
+        threshold=_env_float("QG_POLISH_LENGTH_RATIO_MAX", 3.0),
         failure_mode="fail"
     ),
 ]

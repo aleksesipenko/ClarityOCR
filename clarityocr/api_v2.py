@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import desc
+from sqlalchemy import desc, text
 
 from .db import Artifact, Job, JobEvent, JobFile, get_session
 from .job_manager import (
@@ -131,6 +131,19 @@ async def upload_inputs(files: List[UploadFile] = File(...)):
     batch_dir = _upload_root() / upload_id
     batch_dir.mkdir(parents=True, exist_ok=True)
 
+    # ROBUSTNESS: Check disk space before writing
+    min_free_mb = _env_int("V2_MIN_FREE_DISK_MB", 500)
+    try:
+        disk = shutil.disk_usage(str(batch_dir))
+        if disk.free < min_free_mb * 1024 * 1024:
+            shutil.rmtree(batch_dir, ignore_errors=True)
+            raise HTTPException(
+                status_code=507,
+                detail=f"Insufficient disk space: {disk.free // (1024*1024)}MB free, need at least {min_free_mb}MB"
+            )
+    except OSError:
+        pass  # disk_usage failed, proceed anyway
+
     saved_inputs: List[str] = []
     saved_meta: List[Dict[str, Any]] = []
 
@@ -155,8 +168,19 @@ async def upload_inputs(files: List[UploadFile] = File(...)):
                             status_code=400,
                             detail=f"File too large: {original_name} (limit {max_file_size_mb} MB)",
                         )
-                    out.write(chunk)
+                    try:
+                        out.write(chunk)
+                    except OSError as disk_err:
+                        raise HTTPException(
+                            status_code=507,
+                            detail=f"Disk write failed for {original_name}: {disk_err}"
+                        )
             await upload.close()
+
+            # ROBUSTNESS: Reject empty files
+            if size == 0:
+                target.unlink(missing_ok=True)
+                raise HTTPException(status_code=400, detail=f"Empty file rejected: {original_name}")
 
             saved_inputs.append(str(target.resolve()))
             saved_meta.append(
@@ -183,6 +207,15 @@ def start_job(request: JobStartV2Request):
         raise HTTPException(status_code=400, detail=f"Unsupported mode: {request.mode}")
     if request.preset not in ALLOWED_PRESETS:
         raise HTTPException(status_code=400, detail=f"Unsupported preset: {request.preset}")
+
+    # ROBUSTNESS: Verify input files exist before creating job
+    for input_path in request.inputs:
+        if not input_path.startswith("http://") and not input_path.startswith("https://"):
+            if not Path(input_path).exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Input file not found on server: {Path(input_path).name}. Upload files first via /uploads."
+                )
 
     try:
         validate_inputs_security(request.inputs)
@@ -307,6 +340,9 @@ def get_job_status(job_id: str):
             "eta_seconds": eta_seconds,
             "files_done": files_done,
             "files_total": files_total,
+            # ROBUSTNESS: Include error summary so callers don't need a second request
+            "errors": [f.last_error_message for f in files if f.last_error_message][:5],
+            "error_count": sum(1 for f in files if f.last_error_message),
         }
 
 
@@ -370,6 +406,12 @@ def download_artifact(artifact_id: str):
         if not resolved.exists() or not resolved.is_file():
             raise HTTPException(status_code=404, detail="Artifact file is missing")
 
+        # Path traversal protection: ensure artifact is under allowed roots
+        resolved_abs = resolved.resolve()
+        allowed_roots = [Path("output_v2").resolve(), _upload_root().resolve()]
+        if not any(str(resolved_abs).startswith(str(root)) for root in allowed_roots):
+            raise HTTPException(status_code=403, detail="Artifact path outside allowed directory")
+
         return FileResponse(str(resolved), filename=resolved.name, media_type="application/octet-stream")
 
 
@@ -431,6 +473,9 @@ def retry_failed_job(job_id: str):
 @router.get("/jobs/{job_id}/events")
 def get_job_events(job_id: str, limit: int = 200, skip: int = 0):
     with get_session() as session:
+        job = session.query(Job).filter_by(job_id=job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
         events = (
             session.query(JobEvent)
             .filter_by(job_id=job_id)
@@ -484,9 +529,8 @@ def _probe_db() -> str:
     """Probe database connectivity."""
     try:
         with get_session() as session:
-            # Simple query to check DB is responsive
-            session.execute("SELECT 1")
-        return "ready"
+            session.execute(text("SELECT 1"))
+            return "ready"
     except Exception:
         return "unavailable"
 

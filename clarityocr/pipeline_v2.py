@@ -73,26 +73,21 @@ def _stage_context(file_id: str, job_id: str, stage: str, pages_total: Optional[
 def _timeout_context(timeout_sec: int):
     """
     Context manager for enforcing processing time limits.
-    Raises TimeoutError if processing exceeds timeout.
-    Note: Only works on Unix-like systems (signal.SIGALRM).
+    Thread-safe: uses threading.Event instead of signal.SIGALRM.
+    The yielded event can be checked with .is_set() for cooperative timeout.
+    Note: This is a cooperative timeout — the inner code must check periodically.
+    The subprocess-level timeout in _process_file_inner provides the hard kill.
     """
-    def timeout_handler(signum, frame):
-        raise TimeoutError(f"Processing exceeded time limit of {timeout_sec}s")
-
-    # Set up timeout only on Unix systems AND only from the main thread
-    # (signal.signal() raises ValueError if called from a worker thread)
-    if hasattr(signal, 'SIGALRM') and threading.current_thread() is threading.main_thread():
-        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(timeout_sec)
-        try:
-            yield
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-    else:
-        # Worker thread or Windows: skip SIGALRM-based timeout.
-        # TODO: Implement thread-safe timeout using threading.Timer if needed.
-        yield
+    timed_out = threading.Event()
+    def _fire():
+        timed_out.set()
+    timer = threading.Timer(timeout_sec, _fire)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield timed_out
+    finally:
+        timer.cancel()
 
 # Constants from Implementation Plan v2.2.1
 HEARTBEAT_INTERVAL_SEC = 5
@@ -235,6 +230,8 @@ class PipelineWorker(threading.Thread):
         
     def run(self):
         logger.info(f"Worker {self.worker_id} starting on GPU {self.gpu_id}")
+        _idle_wait = HEARTBEAT_INTERVAL_SEC
+        _MAX_IDLE_WAIT = 30
         
         while not self.stop_event.is_set():
             # Heartbeat & recovery
@@ -260,8 +257,10 @@ class PipelineWorker(threading.Thread):
                     self.current_file_id = file_id
                     self._process_file(file_id, job_id, input_path)
                     self.current_file_id = None
+                    _idle_wait = HEARTBEAT_INTERVAL_SEC  # Reset on work
                 else:
-                    self.stop_event.wait(HEARTBEAT_INTERVAL_SEC)
+                    self.stop_event.wait(_idle_wait)
+                    _idle_wait = min(_idle_wait * 1.5, _MAX_IDLE_WAIT)  # Back off when idle
                     
             except Exception as e:
                 logger.error(f"Worker {self.worker_id} error processing: {e}")
@@ -701,6 +700,17 @@ class PipelineWorker(threading.Thread):
                 output_dir = os.path.join("output_v2", job_id, file_id)
                 os.makedirs(output_dir, exist_ok=True)
 
+                # ROBUSTNESS: Check disk space before processing
+                try:
+                    _disk = __import__("shutil").disk_usage(output_dir)
+                    if _disk.free < 100 * 1024 * 1024:  # 100MB minimum
+                        raise PipelineError(
+                            ErrorCode.E_RESOURCE_LIMIT,
+                            f"Insufficient disk space for output: {_disk.free // (1024*1024)}MB free, need at least 100MB"
+                        )
+                except OSError:
+                    pass  # disk_usage failed, proceed anyway
+
                 # Get page count for progress tracking
                 page_count = None
                 try:
@@ -1029,13 +1039,20 @@ class PipelineWorker(threading.Thread):
                     env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
                     
                     project_root = str(Path(__file__).resolve().parent.parent)
+                    # ROBUSTNESS: Dynamic timeout based on merged PDF page count
+                    try:
+                        _merged_pages = get_page_count(out_pdf)
+                    except Exception:
+                        _merged_pages = 100
+                    _merge_ocr_timeout = 120 + max(_merged_pages, 50) * 10
+                    logger.info(f"merge_then_ocr: {_merged_pages} pages, timeout={_merge_ocr_timeout}s")
                     result = subprocess.run(
                         cmd,
                         cwd=project_root,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,
-                        timeout=1200,
+                        timeout=_merge_ocr_timeout,
                         env=env,
                     )
 
@@ -1097,19 +1114,28 @@ class PipelineWorker(threading.Thread):
 # WEBHOOK DELIVERY
 # =============================================================================
 
-def send_webhook(webhook_url: str, secret: str, payload: dict):
-    """Send webhook with HMAC signature. Returns True on 2xx response."""
+def send_webhook(webhook_url: str, secret: str, payload: dict, max_retries: int = 3):
+    """Send webhook with HMAC signature and retry. Returns True on 2xx response."""
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     signature = hmac.new((secret or "").encode("utf-8"), body, hashlib.sha256).hexdigest()
     headers = {
         "Content-Type": "application/json",
         "X-ClarityOCR-Signature": f"sha256={signature}",
     }
-    try:
-        resp = httpx.post(webhook_url, content=body, headers=headers, timeout=10.0)
-        return 200 <= resp.status_code < 300
-    except Exception:
-        return False
+    for attempt in range(max_retries):
+        try:
+            resp = httpx.post(webhook_url, content=body, headers=headers, timeout=10.0)
+            if 200 <= resp.status_code < 300:
+                return True
+            if resp.status_code >= 500:
+                # Server error — retry with backoff
+                time.sleep(2 ** attempt)
+                continue
+            return False  # Client error — don't retry
+        except Exception:
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+    return False
 
 
 # Global worker pool for the FastAPI lifecycle

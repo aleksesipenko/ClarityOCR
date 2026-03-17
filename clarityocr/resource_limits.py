@@ -15,12 +15,23 @@ except ImportError:
     PYPDF2_AVAILABLE = False
 
 
+def _env_int(name: str, default: int) -> int:
+    """Safe env var parsing — invalid values fall back to default."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return default
+
+
 @dataclass
 class ResourceLimits:
     """Resource limit configuration."""
-    max_pages_per_file: int = int(os.getenv("LIMIT_MAX_PAGES", "500"))
-    max_file_size_mb: int = int(os.getenv("LIMIT_MAX_FILE_SIZE_MB", "512"))
-    max_processing_time_sec: int = int(os.getenv("LIMIT_MAX_PROCESSING_TIME", "3600"))
+    max_pages_per_file: int = _env_int("LIMIT_MAX_PAGES", 500)
+    max_file_size_mb: int = _env_int("LIMIT_MAX_FILE_SIZE_MB", 512)
+    max_processing_time_sec: int = _env_int("LIMIT_MAX_PROCESSING_TIME", 3600)
 
 
 class ResourceLimitError(Exception):

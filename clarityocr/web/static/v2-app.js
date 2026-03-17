@@ -459,15 +459,40 @@ async function uploadFiles() {
     formData.append("files", file);
   }
 
+  // Use XMLHttpRequest for upload progress tracking
+  setJobBadge("uploading... 0%");
   try {
-    setJobBadge("uploading...");
-    const data = await apiFetch("/api/v2/uploads", { method: "POST", body: formData });
+    const data = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.upload.addEventListener("progress", (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100);
+          setJobBadge(`uploading... ${pct}%`);
+        }
+      });
+      xhr.addEventListener("load", () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); }
+          catch { resolve({}); }
+        } else {
+          let detail = `${xhr.status} ${xhr.statusText}`;
+          try { const d = JSON.parse(xhr.responseText); detail = d.detail || detail; } catch {}
+          reject(new Error(detail));
+        }
+      });
+      xhr.addEventListener("error", () => reject(new Error("Network error during upload")));
+      xhr.addEventListener("abort", () => reject(new Error("Upload aborted")));
+      xhr.open("POST", apiUrl("/api/v2/uploads"));
+      xhr.send(formData);
+    });
     state.uploadId = data.upload_id;
     state.uploadedInputs = data.inputs || [];
     el("uploadInfo").textContent = `Upload batch: ${state.uploadId} | server files: ${state.uploadedInputs.length}`;
-    setJobBadge("upload complete");
+    setJobBadge("upload complete ✓");
   } catch (err) {
     setJobBadge(`upload failed: ${err.message}`);
+    el("jobBadge")?.classList.add("badge-error");
+    setTimeout(() => el("jobBadge")?.classList.remove("badge-error"), 5000);
   }
 }
 
