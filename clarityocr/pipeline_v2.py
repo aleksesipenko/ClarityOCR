@@ -232,7 +232,11 @@ class PipelineWorker(threading.Thread):
         logger.info(f"Worker {self.worker_id} starting on GPU {self.gpu_id}")
         _idle_wait = HEARTBEAT_INTERVAL_SEC
         _MAX_IDLE_WAIT = 30
-        
+
+        # STARTUP RECOVERY: requeue any files left in "running" from a previous crash/restart.
+        # On fresh start no subprocess is alive, so all "running" files are orphaned.
+        self._startup_recover_orphaned_files()
+
         while not self.stop_event.is_set():
             # Heartbeat & recovery
             try:
@@ -281,6 +285,52 @@ class PipelineWorker(threading.Thread):
                         logger.error(f"Worker {self.worker_id} failed to mark file {file_id} as failed: {inner}")
                 self.current_file_id = None
                 self.stop_event.wait(HEARTBEAT_INTERVAL_SEC)
+
+    def _startup_recover_orphaned_files(self):
+        """On fresh worker start, requeue any files stuck in 'running' status.
+        Since all workers just started, no subprocess can be alive for these files.
+        Only runs once across all workers (guarded by _startup_recovery_lock)."""
+        global _startup_recovery_done
+        with _startup_recovery_lock:
+            if _startup_recovery_done:
+                return
+            _startup_recovery_done = True
+        try:
+            with get_session() as session:
+                running_files = session.query(JobFile).filter(JobFile.status == "running").all()
+                if not running_files:
+                    return
+                logger.warning(f"Startup recovery: found {len(running_files)} orphaned running files, requeuing...")
+                for f in running_files:
+                    try:
+                        next_attempt = (f.attempt or 0) + 1
+                        if next_attempt >= (f.max_attempts or 3):
+                            transition_file_status(
+                                session, f.id, "failed_final",
+                                attempt=next_attempt,
+                                last_error_code="E_RESTART_ORPHAN",
+                                last_error_message="File was running during server restart, max attempts exceeded",
+                            )
+                            append_event(session, f.job_id, "file_failed_final", file_id=f.id,
+                                         payload={"reason": "restart_orphan", "attempt": next_attempt})
+                        else:
+                            transition_file_status(
+                                session, f.id, "queued",
+                                attempt=next_attempt,
+                                last_error_code="E_RESTART_ORPHAN",
+                                last_error_message="File was running during server restart, requeued",
+                            )
+                            append_event(session, f.job_id, "file_requeued_stale", file_id=f.id,
+                                         payload={"reason": "restart_orphan", "attempt": next_attempt})
+                        logger.info(f"Startup recovery: file {f.id} -> {'queued' if next_attempt < (f.max_attempts or 3) else 'failed_final'}")
+                    except Exception as exc:
+                        logger.warning(f"Startup recovery: failed to recover file {f.id}: {exc}")
+                # Also requeue any jobs still marked "running" whose files are all resolved
+                running_jobs = session.query(Job).filter(Job.status == "running").all()
+                for job in running_jobs:
+                    check_and_update_job_completion(session, job.job_id)
+        except Exception as e:
+            logger.error(f"Startup recovery failed: {e}")
 
     def _recover_stale_files(self, session):
         """Find files running on dead workers and requeue/fail them."""
@@ -1179,6 +1229,10 @@ def send_webhook(webhook_url: str, secret: str, payload: dict, max_retries: int 
 # Multiple workers can run in parallel, but only N can do GPU work simultaneously
 _GPU_CONCURRENCY = int(os.getenv("V2_GPU_CONCURRENCY", "1"))
 _gpu_semaphore = threading.Semaphore(_GPU_CONCURRENCY)
+
+# Startup recovery guard: only first worker runs orphan recovery
+_startup_recovery_done = False
+_startup_recovery_lock = threading.Lock()
 
 # Global worker pool for the FastAPI lifecycle
 _workers: list[PipelineWorker] = []
